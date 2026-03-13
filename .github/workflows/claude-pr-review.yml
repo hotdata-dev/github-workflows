@@ -6,7 +6,8 @@ on:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
+    # TODO: remove author filter after testing is complete
+    if: github.event.pull_request.draft == false && github.event.pull_request.user.login == 'zfarrell'
     runs-on: ubuntu-latest
     permissions:
       contents: read
