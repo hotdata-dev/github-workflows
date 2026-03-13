@@ -59,7 +59,7 @@ jobs:
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read"
 
       - name: Notify on review failure
-        if: steps.review.outcome == 'failure'
+        if: steps.review.outcome == 'failure' || steps.review.outcome == 'cancelled'
         run: gh pr comment ${{ github.event.pull_request.number }} --body "Automated review unavailable (Claude step failed). Please review manually."
         env:
           GH_TOKEN: ${{ github.token }}
