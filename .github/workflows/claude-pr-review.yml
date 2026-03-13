@@ -18,9 +18,18 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: 3060111
+          private-key: ${{ secrets.HOTDATA_AUTOMATION_PRIVATE_KEY }}
+          owner: hotdata-dev
+
       - uses: actions/checkout@v4
         with:
           repository: hotdata-dev/github-workflows
+          token: ${{ steps.app-token.outputs.token }}
           path: .github-workflows
           sparse-checkout: docs/claude-pr-review-prompt.md
           sparse-checkout-cone-mode: false
