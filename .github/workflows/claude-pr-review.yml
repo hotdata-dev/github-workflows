@@ -6,7 +6,8 @@ on:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
+    # TODO: remove author filter after testing is complete
+    if: github.event.pull_request.draft == false && github.event.pull_request.user.login == 'zfarrell'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -35,4 +36,4 @@ jobs:
 
             ${{ steps.prompt.outputs.content }}
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read"
