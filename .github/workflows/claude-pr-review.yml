@@ -9,6 +9,7 @@ jobs:
     # TODO: remove author filter after testing is complete
     if: github.event.pull_request.draft == false && github.event.pull_request.user.login == 'zfarrell'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: write
@@ -29,6 +30,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: hotdata-dev/github-workflows
+          ref: main
           token: ${{ steps.app-token.outputs.token }}
           path: .github-workflows
           sparse-checkout: docs/claude-pr-review-prompt.md
@@ -43,6 +45,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - uses: anthropics/claude-code-action@v1
+        continue-on-error: true
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           track_progress: false
