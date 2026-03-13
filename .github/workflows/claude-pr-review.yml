@@ -18,10 +18,17 @@ jobs:
         with:
           fetch-depth: 1
 
+      - uses: actions/checkout@v4
+        with:
+          repository: hotdata-dev/github-workflows
+          path: .github-workflows
+          sparse-checkout: docs/claude-pr-review-prompt.md
+          sparse-checkout-cone-mode: false
+
       - name: Load review prompt
         id: prompt
         run: |
-          PROMPT=$(cat docs/claude-pr-review-prompt.md)
+          PROMPT=$(cat .github-workflows/docs/claude-pr-review-prompt.md)
           echo "content<<EOF" >> $GITHUB_OUTPUT
           echo "$PROMPT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
