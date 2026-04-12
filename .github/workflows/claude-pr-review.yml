@@ -47,6 +47,42 @@ jobs:
           echo "$PROMPT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
+      - name: Verify jq is available
+        run: jq --version
+
+      - name: Gather review context
+        id: context
+        run: |
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          REPO=${{ github.repository }}
+
+          CYCLE=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+            --paginate | jq -s '[.[][] | select(.user.type == "Bot" and (.state == "CHANGES_REQUESTED" or .state == "APPROVED"))] | length')
+          echo "review_cycle=$((CYCLE + 1))" >> $GITHUB_OUTPUT
+
+          THREADS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" \
+            --paginate | jq -s -r '
+            add | sort_by(.created_at) |
+            if length == 0 then "No prior review comments."
+            else .[] |
+              "---",
+              "Author: \(.user.login)",
+              "File: \(.path)",
+              (if .line then "Line: \(.line)" else empty end),
+              (if .in_reply_to_id then "Reply to #\(.in_reply_to_id)" else "Thread #\(.id)" end),
+              "",
+              .body
+            end
+          ')
+
+          {
+            echo "threads<<REVIEW_CONTEXT_HEREDOC"
+            echo "$THREADS"
+            echo "REVIEW_CONTEXT_HEREDOC"
+          } >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - uses: anthropics/claude-code-action@v1
         id: review
         continue-on-error: true
@@ -57,6 +93,10 @@ jobs:
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
+            REVIEW CYCLE: ${{ steps.context.outputs.review_cycle }}
+
+            ## Prior Review Comments
+            ${{ steps.context.outputs.threads }}
 
             ${{ steps.prompt.outputs.content }}
           claude_args: |
