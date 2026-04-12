@@ -75,10 +75,11 @@ jobs:
             end
           ')
 
+          DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
           {
-            echo "threads<<REVIEW_CONTEXT_HEREDOC"
+            echo "threads<<${DELIMITER}"
             echo "$THREADS"
-            echo "REVIEW_CONTEXT_HEREDOC"
+            echo "${DELIMITER}"
           } >> $GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ github.token }}
