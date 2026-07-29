@@ -65,8 +65,12 @@ jobs:
           PR_NUMBER=${{ github.event.pull_request.number }}
           REPO=${{ github.repository }}
 
+          # Count distinct commits already reviewed, never review state: the org ruleset
+          # sets dismiss_stale_reviews_on_push, so a push flips every prior APPROVED to
+          # DISMISSED. Inline comments each create their own COMMENTED review sharing the
+          # round's commit_id, so unique commit_id == round count.
           CYCLE=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
-            --paginate | jq -s '[.[][] | select(.user.type == "Bot" and (.state == "CHANGES_REQUESTED" or .state == "APPROVED"))] | length')
+            --paginate | jq -s '[.[][] | select(.user.login == "claude[bot]") | .commit_id] | unique | length')
           echo "review_cycle=$((CYCLE + 1))" >> $GITHUB_OUTPUT
 
           THREADS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" \
