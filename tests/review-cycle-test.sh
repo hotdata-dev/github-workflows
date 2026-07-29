@@ -16,16 +16,24 @@ cd "$(dirname "$0")/.."
 
 WORKFLOW=.github/workflows/claude-pr-review.yml
 
-JQ_PROG=$(sed -n "s/^ *CYCLE_JQ='\(.*\)'\$/\1/p" "$WORKFLOW")
-if [ -z "$JQ_PROG" ]; then
-  echo "FAIL: no CYCLE_JQ='...' assignment found in $WORKFLOW"
-  exit 1
-fi
-if [ "$(printf '%s\n' "$JQ_PROG" | wc -l)" -ne 1 ]; then
-  echo "FAIL: more than one CYCLE_JQ assignment in $WORKFLOW:"
-  printf '%s\n' "$JQ_PROG"
-  exit 1
-fi
+# extract_jq <shell variable name> -- pull a single-quoted jq program out of the workflow
+extract_jq() {
+  local name=$1 prog
+  prog=$(sed -n "s/^ *$name='\(.*\)'\$/\1/p" "$WORKFLOW")
+  if [ -z "$prog" ]; then
+    echo "FAIL: no $name='...' assignment found in $WORKFLOW" >&2
+    exit 1
+  fi
+  if [ "$(printf '%s\n' "$prog" | wc -l)" -ne 1 ]; then
+    echo "FAIL: more than one $name assignment in $WORKFLOW:" >&2
+    printf '%s\n' "$prog" >&2
+    exit 1
+  fi
+  printf '%s' "$prog"
+}
+
+CYCLE_JQ=$(extract_jq CYCLE_JQ)
+DRIFT_JQ=$(extract_jq DRIFT_JQ)
 
 failures=0
 
@@ -33,12 +41,26 @@ failures=0
 expect() {
   local fixture=$1 want=$2 desc=$3
   local count actual
-  count=$(jq -s "$JQ_PROG" "tests/fixtures/$fixture")
+  count=$(jq -s "$CYCLE_JQ" "tests/fixtures/$fixture")
   actual=$((count + 1))
   if [ "$actual" -eq "$want" ]; then
     echo "ok   $desc (cycle=$actual)"
   else
     echo "FAIL $desc: expected cycle $want, got $actual"
+    failures=$((failures + 1))
+  fi
+}
+
+# expect_drift <fixture> <fires|silent> <description>
+expect_drift() {
+  local fixture=$1 want=$2 desc=$3 actual=silent
+  if jq -e -s "$DRIFT_JQ" "tests/fixtures/$fixture" >/dev/null 2>&1; then
+    actual=fires
+  fi
+  if [ "$actual" = "$want" ]; then
+    echo "ok   $desc ($actual)"
+  else
+    echo "FAIL $desc: expected $want, got $actual"
     failures=$((failures + 1))
   fi
 }
@@ -55,9 +77,12 @@ expect reviews-mixed-bots.json 3 "only claude[bot] rounds count, one per commit"
 
 # The counter is keyed on the reviewer's login. If claude-code-action ever posts under a
 # different identity the count collapses to 0 and every round reads as cycle 1 again --
-# the original bug. Asserted so the coupling is explicit; no fixture can catch that in CI,
-# so the workflow also emits a warning annotation when it sees this shape at runtime.
+# the original bug. The drift predicate is the runtime backstop for that; it is only
+# consulted when the count is 0, so it has to separate "the login moved" from "genuine
+# first review".
 expect reviews-foreign-reviewer.json 1 "unknown reviewer login yields no rounds"
+expect_drift reviews-foreign-reviewer.json fires "drift warning fires when the login moved"
+expect_drift reviews-first-review.json silent "drift warning silent on a genuine cycle 1"
 
 # gh 2.93 merges --paginate pages into one array; older versions concatenate one array per
 # page. `jq -s '.[][]'` must handle both, so keep a concatenated fixture.

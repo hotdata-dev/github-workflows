@@ -73,6 +73,9 @@ jobs:
           # Coupled to the reviewer's login: if that ever changes the count silently drops
           # to 0 and every round looks like the first, hence the warning below.
           CYCLE_JQ='[.[][] | select(.user.login == "claude[bot]") | .commit_id] | unique | length'
+          # Only consulted when CYCLE is 0; see the warning below. Kept in its own variable
+          # so tests/review-cycle-test.sh can assert it against the fixtures.
+          DRIFT_JQ='any(.[][]; .user.type == "Bot")'
           # Never fail the review over the cycle number; degrade to 1, but say so. gh
           # writes its error body to stdout, so an unguarded pipe into jq aborts the step
           # under `bash -e` and skips the failure-notification step below.
@@ -85,7 +88,7 @@ jobs:
             echo "::warning::Could not parse prior reviews; treating this as review cycle 1."
             CYCLE=0
           elif [ "$CYCLE" -eq 0 ] && printf '%s' "$REVIEWS" \
-            | jq -e -s 'any(.[][]; .user.type == "Bot")' >/dev/null 2>&1; then
+            | jq -e -s "$DRIFT_JQ" >/dev/null 2>&1; then
             # claude[bot] is the only bot that submits reviews across the org (598 of 598
             # sampled), so bot reviews that the login filter did not count mean the
             # reviewer's identity moved and the counter has silently pinned at 1.
