@@ -1,0 +1,44 @@
+[
+  {
+    "id": 1,
+    "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "COMMENTED",
+    "submitted_at": "2026-07-01T00:00:00Z",
+    "user": { "login": "claude[bot]", "type": "Bot" }
+  },
+  {
+    "id": 2,
+    "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "CHANGES_REQUESTED",
+    "submitted_at": "2026-07-01T00:00:05Z",
+    "user": { "login": "claude[bot]", "type": "Bot" }
+  },
+  {
+    "id": 3,
+    "commit_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "state": "DISMISSED",
+    "submitted_at": "2026-07-01T01:00:00Z",
+    "user": { "login": "claude[bot]", "type": "Bot" }
+  },
+  {
+    "id": 4,
+    "commit_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "state": "APPROVED",
+    "submitted_at": "2026-07-01T01:05:00Z",
+    "user": { "login": "hotdata-automation[bot]", "type": "Bot" }
+  },
+  {
+    "id": 5,
+    "commit_id": "cccccccccccccccccccccccccccccccccccccccc",
+    "state": "APPROVED",
+    "submitted_at": "2026-07-01T02:00:00Z",
+    "user": { "login": "aikido-autofix[bot]", "type": "Bot" }
+  },
+  {
+    "id": 6,
+    "commit_id": "dddddddddddddddddddddddddddddddddddddddd",
+    "state": "APPROVED",
+    "submitted_at": "2026-07-01T03:00:00Z",
+    "user": { "login": "zfarrell", "type": "User" }
+  }
+]
