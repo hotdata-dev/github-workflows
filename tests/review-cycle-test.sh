@@ -4,9 +4,11 @@
 # the real reviews API. The jq program is extracted from the workflow rather than copied,
 # so the test exercises the shipped expression.
 #
-# Regression: a counter that filtered on review state read 1 on every round, because
-# dismiss_stale_reviews_on_push flips each prior APPROVED to DISMISSED. That silently
-# disabled the prompt's cycle-awareness ladder on every approve-with-nits PR.
+# Regression: the counter used to filter on review state (CHANGES_REQUESTED/APPROVED). On
+# a PR whose every round ends in approve-with-nits, dismiss_stale_reviews_on_push flips
+# each of those approvals to DISMISSED, so the filter matched nothing and the counter read
+# 1 forever, silently disabling the prompt's cycle-awareness ladder. CHANGES_REQUESTED
+# survives a push, so request-changes PRs counted correctly and the bug stayed hidden.
 
 set -euo pipefail
 
@@ -14,13 +16,13 @@ cd "$(dirname "$0")/.."
 
 WORKFLOW=.github/workflows/claude-pr-review.yml
 
-JQ_PROG=$(sed -n "s/.*| jq -s '\(.*\)')\$/\1/p" "$WORKFLOW")
+JQ_PROG=$(sed -n "s/^ *CYCLE_JQ='\(.*\)'\$/\1/p" "$WORKFLOW")
 if [ -z "$JQ_PROG" ]; then
-  echo "FAIL: could not extract the review-cycle jq program from $WORKFLOW"
+  echo "FAIL: no CYCLE_JQ='...' assignment found in $WORKFLOW"
   exit 1
 fi
 if [ "$(printf '%s\n' "$JQ_PROG" | wc -l)" -ne 1 ]; then
-  echo "FAIL: extracted more than one jq program from $WORKFLOW:"
+  echo "FAIL: more than one CYCLE_JQ assignment in $WORKFLOW:"
   printf '%s\n' "$JQ_PROG"
   exit 1
 fi
@@ -50,6 +52,22 @@ expect reviews-approve-with-nits.json 10 "nine dismissed approve-with-nits round
 
 # Rounds counted regardless of state; approvals by other bots and by humans do not count.
 expect reviews-mixed-bots.json 3 "only claude[bot] rounds count, one per commit"
+
+# The counter is keyed on the reviewer's login. If claude-code-action ever posts under a
+# different identity the count collapses to 0 and every round reads as cycle 1 again --
+# the original bug. Asserted so the coupling is explicit; no fixture can catch that in CI,
+# so the workflow also emits a warning annotation when it sees this shape at runtime.
+expect reviews-foreign-reviewer.json 1 "unknown reviewer login yields no rounds"
+
+# gh 2.93 merges --paginate pages into one array; older versions concatenate one array per
+# page. `jq -s '.[][]'` must handle both, so keep a concatenated fixture.
+expect reviews-paginated.json 3 "concatenated --paginate pages count once each"
+
+# Known +/-1: monopoly#1534 round 1 posted 5 inline comments against a89f19e8, then its
+# approve landed 5s later against 951c8afa because a push arrived mid-review, so 5 real
+# rounds count as 6. Harmless against a 5-step ladder; asserted so a future change to the
+# counter has to acknowledge this case rather than shift it silently.
+expect reviews-straddled-round.json 7 "push landing mid-round splits it in two"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures test(s) failed"
