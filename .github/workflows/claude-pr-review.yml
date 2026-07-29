@@ -65,13 +65,46 @@ jobs:
           PR_NUMBER=${{ github.event.pull_request.number }}
           REPO=${{ github.repository }}
 
-          CYCLE=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
-            --paginate | jq -s '[.[][] | select(.user.type == "Bot" and (.state == "CHANGES_REQUESTED" or .state == "APPROVED"))] | length')
+          # Count distinct commits already reviewed, never review state: the org ruleset
+          # sets dismiss_stale_reviews_on_push, so a push flips a prior APPROVED to
+          # DISMISSED and a state filter stops matching it. Inline comments each create
+          # their own COMMENTED review sharing the round's commit_id, so unique commit_id
+          # == round count, +/-1 when a push lands mid-round and splits it across two SHAs.
+          # Coupled to the reviewer's login: if that ever changes the count silently drops
+          # to 0 and every round looks like the first, hence the warning below.
+          CYCLE_JQ='[.[][] | select(.user.login == "claude[bot]") | .commit_id] | unique | length'
+          # Only consulted when CYCLE is 0; see the warning below. Kept in its own variable
+          # so tests/review-cycle-test.sh can assert it against the fixtures.
+          DRIFT_JQ='any(.[][]; .user.type == "Bot")'
+          # Never fail the review over the cycle number; degrade to 1, but say so. gh
+          # writes its error body to stdout, so an unguarded pipe into jq aborts the step
+          # under `bash -e` and skips the failure-notification step below.
+          if ! REVIEWS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate); then
+            echo "::warning::Could not read prior reviews; treating this as review cycle 1."
+            REVIEWS=''
+          fi
+          CYCLE=$(printf '%s' "$REVIEWS" | jq -s "$CYCLE_JQ" 2>/dev/null) || CYCLE=''
+          if [ -z "$CYCLE" ]; then
+            echo "::warning::Could not parse prior reviews; treating this as review cycle 1."
+            CYCLE=0
+          elif [ "$CYCLE" -eq 0 ] && printf '%s' "$REVIEWS" \
+            | jq -e -s "$DRIFT_JQ" >/dev/null 2>&1; then
+            # claude[bot] is the only bot that submits reviews across the org (598 of 598
+            # sampled), so bot reviews that the login filter did not count mean the
+            # reviewer's identity moved and the counter has silently pinned at 1.
+            echo "::warning::Bot reviews exist but none matched the reviewer login; the review cycle counter is stale."
+          fi
           echo "review_cycle=$((CYCLE + 1))" >> $GITHUB_OUTPUT
 
-          THREADS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" \
-            --paginate | jq -s -r '
-            add | sort_by(.created_at) |
+          # Same guard as the counter above: unguarded `gh api | jq` aborts the step, and a
+          # failure here *skips* the review step, so the notify step's failure check never
+          # fires and the PR gets no review and no explanation.
+          if ! COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --paginate); then
+            echo "::warning::Could not read prior review comments; reviewing without them."
+            COMMENTS=''
+          fi
+          THREADS=$(printf '%s' "$COMMENTS" | jq -s -r '
+            (add // []) | sort_by(.created_at) |
             if length == 0 then "No prior review comments."
             else .[] |
               "---",
@@ -82,7 +115,7 @@ jobs:
               "",
               .body
             end
-          ')
+          ') || THREADS='No prior review comments.'
 
           DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
           {
