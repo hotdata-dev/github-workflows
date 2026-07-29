@@ -81,15 +81,25 @@ jobs:
             REVIEWS=''
           fi
           CYCLE=$(printf '%s' "$REVIEWS" | jq -s "$CYCLE_JQ" 2>/dev/null) || CYCLE=0
+          # Zero rounds plus an *unrecognized* bot reviewer is the login-drift shape. The
+          # bots below legitimately review ahead of the first Claude round, so counting
+          # them here would warn on every ordinary cycle 1.
           if [ "$CYCLE" -eq 0 ] && printf '%s' "$REVIEWS" \
-            | jq -e -s 'any(.[][]; .user.type == "Bot")' >/dev/null 2>&1; then
-            echo "::warning::Bot reviews exist but none matched the reviewer login; the review cycle counter is stale."
+            | jq -e -s --argjson known '["hotdata-automation[bot]", "aikido-autofix[bot]", "dependabot[bot]"]' \
+              'any(.[][]; .user.type == "Bot" and (.user.login | IN($known[]) | not))' >/dev/null 2>&1; then
+            echo "::warning::Unrecognized bot reviewer and no counted rounds; the review cycle counter may be stale."
           fi
           echo "review_cycle=$((CYCLE + 1))" >> $GITHUB_OUTPUT
 
-          THREADS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" \
-            --paginate | jq -s -r '
-            add | sort_by(.created_at) |
+          # Same guard as the counter above: unguarded `gh api | jq` aborts the step, and a
+          # failure here *skips* the review step, so the notify step's failure check never
+          # fires and the PR gets no review and no explanation.
+          if ! COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --paginate); then
+            echo "::warning::Could not read prior review comments; reviewing without them."
+            COMMENTS=''
+          fi
+          THREADS=$(printf '%s' "$COMMENTS" | jq -s -r '
+            (add // []) | sort_by(.created_at) |
             if length == 0 then "No prior review comments."
             else .[] |
               "---",
@@ -100,7 +110,7 @@ jobs:
               "",
               .body
             end
-          ')
+          ') || THREADS='No prior review comments.'
 
           DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
           {
