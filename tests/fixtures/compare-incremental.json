@@ -1,0 +1,21 @@
+{
+  "status": "ahead",
+  "ahead_by": 2,
+  "total_commits": 2,
+  "files": [
+    {
+      "filename": "python/webapp/orgs/tasks.py",
+      "status": "modified",
+      "patch": "@@ -60,7 +60,7 @@ def ensure(org):\n-    if dry_run:\n+    if dry_run and provisioned:\n         return"
+    },
+    {
+      "filename": "docs/architecture.png",
+      "status": "added"
+    },
+    {
+      "filename": "python/webapp/orgs/legacy.py",
+      "status": "removed",
+      "patch": "@@ -1,3 +0,0 @@\n-def old():\n-    pass"
+    }
+  ]
+}
