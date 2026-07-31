@@ -152,13 +152,11 @@ jobs:
       # Grep/Glob above were added because 64% of runs (256/400 sampled) hit at least
       # one permission denial — 1,562 denials across 7,819 turns. Search is the only
       # tool class the prompt's "read affected files for context" step needs that the
-      # allowlist withheld. This artifact is how we confirm that: the action writes
-      # every tool_use with its full input here, and without the upload it dies with
-      # the runner (the job log only records init + result, and the check-run summary
-      # is empty under track_progress: false).
-      # Grep/Glob above are a hypothesis; this is how it gets checked. The action writes
-      # the full conversation to execution_file but only prints permission_denials.length
-      # to the job log, so the denied tool *names* exist nowhere a later run can read.
+      # allowlist withheld. That is a hypothesis, and this is how it gets checked: the
+      # action writes the full conversation to execution_file but prints only
+      # permission_denials.length to the job log (and the check-run summary is empty
+      # under track_progress: false), so the denied tool *names* exist nowhere a later
+      # run can read, and the file itself dies with the runner.
       #
       # Never upload that file as-is. It holds every tool input and result, the runner has
       # a readable git credential (checkout persists one via includeIf into
