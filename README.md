@@ -14,10 +14,16 @@ Automated code review on every pull request using [claude-code-action](https://g
 
 The review prompt lives in [`docs/claude-pr-review-prompt.md`](docs/claude-pr-review-prompt.md).
 
-Each run attaches a `claude-execution-log-pr-<number>` artifact (14-day retention) holding the
-agent's full tool-call record. The job log itself keeps only the start and end of the run, so this
-artifact is the only way to see which tools the reviewer reached for — it exists to diagnose
-permission denials against the workflow's `--allowedTools` list. Upload failures are non-fatal.
+Each run attaches a `claude-tool-usage-pr-<number>` artifact (14-day retention): tool call counts,
+denied tool names, and the run's turn count and cost. It exists to diagnose permission denials
+against the workflow's `--allowedTools` list, since the job log records only the number of denials,
+never which tools were refused.
+
+The artifact is a projection of the action's execution log, never the log itself — that file is the
+full conversation, and the runner holds a git credential the reviewer can read, which artifacts
+(unlike job logs) would not mask. `TOOL_USAGE_JQ` in the workflow emits names and counts only, and
+`tests/tool-usage-test.sh` asserts that tool inputs, tool results, and repository contents cannot
+reach the artifact. Both the projection and the upload are non-fatal.
 
 ## Setup
 

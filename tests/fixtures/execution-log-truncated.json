@@ -1,0 +1,22 @@
+[
+  {
+    "type": "system",
+    "subtype": "init",
+    "message": "Claude Code initialized",
+    "model": "claude-opus-5[1m]"
+  },
+  {
+    "type": "assistant",
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_1",
+          "name": "Read",
+          "input": { "file_path": ".github/workflows/claude-pr-review.yml" }
+        }
+      ]
+    }
+  }
+]
