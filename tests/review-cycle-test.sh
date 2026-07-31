@@ -34,6 +34,7 @@ extract_jq() {
 
 CYCLE_JQ=$(extract_jq CYCLE_JQ)
 DRIFT_JQ=$(extract_jq DRIFT_JQ)
+LAST_SHA_JQ=$(extract_jq LAST_SHA_JQ)
 
 failures=0
 
@@ -93,6 +94,40 @@ expect reviews-paginated.json 3 "concatenated --paginate pages count once each"
 # rounds count as 6. Harmless against a 5-step ladder; asserted so a future change to the
 # counter has to acknowledge this case rather than shift it silently.
 expect reviews-straddled-round.json 7 "push landing mid-round splits it in two"
+
+# The incremental-diff base: head SHA of the most recent claude[bot] review. Cycle 2+ diffs
+# that SHA against the PR head so a re-review sees the push and not the whole PR again.
+#
+# expect_last_sha <fixture> <expected sha or empty> <description>
+expect_last_sha() {
+  local fixture=$1 want=$2 desc=$3 actual
+  actual=$(jq -s -r "$LAST_SHA_JQ" "tests/fixtures/$fixture")
+  if [ "$actual" = "$want" ]; then
+    echo "ok   $desc"
+  else
+    echo "FAIL $desc: expected '$want', got '$actual'"
+    failures=$((failures + 1))
+  fi
+}
+
+# Empty means "no base to diff from" and the workflow falls back to the full diff. Both of
+# these must produce empty rather than a stray SHA: a wrong base would silently narrow the
+# review to the wrong range, which is worse than reviewing everything.
+expect_last_sha reviews-first-review.json "" "no prior claude review yields no diff base"
+expect_last_sha reviews-foreign-reviewer.json "" "foreign reviewer login yields no diff base"
+
+# Reviews by other bots and by humans land *after* claude's last round in this fixture. The
+# base has to be claude's own last commit_id (bbbb), not the newest review overall (dddd),
+# or cycle 2+ would diff against a tree claude never reviewed and skip real changes.
+expect_last_sha reviews-mixed-bots.json \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "diff base ignores newer non-claude reviews"
+expect_last_sha reviews-paginated.json \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "diff base survives concatenated --paginate pages"
+
+# The last round's state is irrelevant: dismiss_stale_reviews_on_push turns claude's own
+# approvals into DISMISSED, and a dismissed review still reviewed that tree.
+expect_last_sha reviews-approve-with-nits.json \
+  fab04bd24df816278c5ac3aa38935f47ecac9b03 "dismissed approval still serves as the diff base"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures test(s) failed"
