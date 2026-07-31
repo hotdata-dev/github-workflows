@@ -63,6 +63,16 @@ BEGIN { depth = 0; keep = 1; err = "" }
   next
 }
 
+# Anything that mentions a cycle marker but did not match the two strict forms above is
+# malformed, not prose. This must be an error rather than a passthrough: an unrecognised
+# marker keeps its whole block, so a stray indent, a trailing space, or CRLF line endings
+# would silently restore the full nit-bearing prompt at late cycles -- the exact regression
+# this script exists to prevent, arriving with a zero exit status and no warning.
+/<!--[[:space:]]*\/?[[:space:]]*cycle/ {
+  err = "malformed cycle marker at line " NR ": " $0
+  exit 2
+}
+
 { if (!depth || keep) print }
 
 END {

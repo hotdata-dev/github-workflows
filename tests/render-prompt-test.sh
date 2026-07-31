@@ -108,6 +108,40 @@ for bad in '<!-- cycle>=2 -->\nx\n<!-- cycle>=3 -->\ny\n<!-- /cycle -->' \
   fi
 done
 
+# A marker that is ALMOST right is the dangerous case, not an obviously broken one. An
+# unrecognised marker keeps its whole block and exits 0, so before this was an error a stray
+# indent or CRLF silently shipped the full nit-bearing prompt at cycle 6 -- indistinguishable
+# from the behaviour this script exists to remove. Each of these must exit non-zero.
+#
+# near_miss <description> <printf format producing the file>
+near_miss() {
+  local desc=$1 body=$2 out
+  # The assignment lives in the `if` condition on purpose: under `set -e` a bare
+  # `out=$(failing command)` aborts this script instead of running the assertion.
+  if out=$(printf '%b' "$body" | bash "$RENDER" 1 2>&1); then
+    fail "silently ignored a near-miss marker ($desc); its block would leak at every cycle"
+  elif printf '%s' "$out" | grep -q 'malformed cycle marker'; then
+    pass "rejects near-miss marker: $desc"
+  else
+    fail "rejected $desc but without a malformed-marker message"
+  fi
+}
+near_miss "CRLF line endings"        'keep\r\n<!-- cycle>=3 -->\r\nLATE\r\n<!-- /cycle -->\r\n'
+near_miss "trailing space on marker" 'keep\n<!-- cycle>=3 --> \nLATE\n<!-- /cycle -->\n'
+near_miss "indented marker"          'keep\n  <!-- cycle>=3 -->\nLATE\n  <!-- /cycle -->\n'
+near_miss "indented closing marker"  'keep\n<!-- cycle>=3 -->\nLATE\n  <!-- /cycle -->\n'
+near_miss "missing space in marker"  'keep\n<!--cycle>=3-->\nLATE\n<!-- /cycle -->\n'
+near_miss "unknown operator"         'keep\n<!-- cycle!=3 -->\nLATE\n<!-- /cycle -->\n'
+near_miss "non-numeric bound"        'keep\n<!-- cycle>=x -->\nLATE\n<!-- /cycle -->\n'
+
+# The real prompt must contain only strict markers, or CI is asserting against a file that
+# silently stopped being gated.
+if bash "$RENDER" 1 < "$PROMPT" >/dev/null 2>&1; then
+  pass "the shipped prompt has no malformed markers"
+else
+  fail "the shipped prompt contains a malformed marker"
+fi
+
 echo "-- shipped prompt, cycle 1 (full review) --"
 has 1 "### Documentation" "the Documentation criterion"
 has 1 "### Code Quality" "the Code Quality criterion"
