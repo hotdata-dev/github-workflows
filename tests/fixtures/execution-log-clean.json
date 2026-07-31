@@ -1,0 +1,45 @@
+[
+  {
+    "type": "system",
+    "subtype": "init",
+    "message": "Claude Code initialized",
+    "model": "claude-opus-5[1m]"
+  },
+  {
+    "type": "assistant",
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_1",
+          "name": "Bash",
+          "input": { "command": "gh pr view 21" }
+        }
+      ]
+    }
+  },
+  {
+    "type": "assistant",
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_2",
+          "name": "mcp__github_inline_comment__create_inline_comment",
+          "input": { "path": "README.md", "line": 15, "body": "nit: typo" }
+        }
+      ]
+    }
+  },
+  {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "duration_ms": 41200,
+    "num_turns": 7,
+    "total_cost_usd": 0.21,
+    "permission_denials": []
+  }
+]

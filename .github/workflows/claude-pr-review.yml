@@ -147,7 +147,57 @@ jobs:
 
             ${{ steps.prompt.outputs.content }}
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read,Grep,Glob"
+
+      # Grep/Glob above were added because 64% of runs (256/400 sampled) hit at least
+      # one permission denial — 1,562 denials across 7,819 turns. Search is the only
+      # tool class the prompt's "read affected files for context" step needs that the
+      # allowlist withheld. That is a hypothesis, and this is how it gets checked: the
+      # action writes the full conversation to execution_file but prints only
+      # permission_denials.length to the job log (and the check-run summary is empty
+      # under track_progress: false), so the denied tool *names* exist nowhere a later
+      # run can read, and the file itself dies with the runner.
+      #
+      # Never upload that file as-is. It holds every tool input and result, the runner has
+      # a readable git credential (checkout persists one via includeIf into
+      # $RUNNER_TEMP/git-credentials-*.config), Read is unrestricted, and ::add-mask::
+      # scrubs the job log but not artifacts -- so a raw upload turns anything the
+      # reviewer happened to read into a downloadable file. Tool names and counts answer
+      # the allowlist question by themselves, so project to those and upload only that.
+      # The filter below emits no tool input and no result body by construction.
+      #
+      # The review step is continue-on-error so a failed review still reaches the notify
+      # step; empty execution_file means it wrote nothing, hence the output guard. Both
+      # steps here are diagnostic and gate a required org-wide check, so both are
+      # continue-on-error -- losing a metric must never turn a passing review red.
+      - name: Reduce execution log to tool usage
+        id: tool-usage
+        continue-on-error: true
+        if: github.event.pull_request.user.login != 'dependabot[bot]' && steps.review.outputs.execution_file != ''
+        run: |
+          # Kept as a single-line assignment so tests/tool-usage-test.sh can extract and
+          # exercise the shipped expression rather than a copy of it.
+          TOOL_USAGE_JQ='{tool_calls: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name] | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), denials: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(.tool_name // "unknown") | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), result: (([.[]? | select(.type=="result")] | last // {}) | {subtype, is_error, num_turns, duration_ms, total_cost_usd})}'
+          jq "$TOOL_USAGE_JQ" "$EXECUTION_FILE" > "${RUNNER_TEMP}/claude-tool-usage.json"
+        env:
+          # Via env, not a ${{ }} interpolation inside the script, so the path cannot be
+          # spliced into the shell command.
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+
+      - name: Upload Claude tool usage
+        continue-on-error: true
+        if: github.event.pull_request.user.login != 'dependabot[bot]' && steps.tool-usage.outcome == 'success'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: claude-tool-usage-pr-${{ github.event.pull_request.number }}
+          path: ${{ runner.temp }}/claude-tool-usage.json
+          if-no-files-found: ignore
+          # v4+ artifacts are immutable, so re-running a job that already uploaded this
+          # name is otherwise a conflict.
+          overwrite: true
+          # Long enough to compare denial rates before and after the allowlist change
+          # (~100 review runs/week org-wide); the question is days-old, not quarters.
+          retention-days: 14
 
       - name: Notify on review failure
         if: github.event.pull_request.user.login != 'dependabot[bot]' && (steps.review.outcome == 'failure' || steps.review.outcome == 'cancelled')
