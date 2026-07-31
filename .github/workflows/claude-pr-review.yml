@@ -147,7 +147,26 @@ jobs:
 
             ${{ steps.prompt.outputs.content }}
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Read,Grep,Glob"
+
+      # Grep/Glob above were added because 64% of runs (256/400 sampled) hit at least
+      # one permission denial — 1,562 denials across 7,819 turns. Search is the only
+      # tool class the prompt's "read affected files for context" step needs that the
+      # allowlist withheld. This artifact is how we confirm that: the action writes
+      # every tool_use with its full input here, and without the upload it dies with
+      # the runner (the job log only records init + result, and the check-run summary
+      # is empty under track_progress: false).
+      # The review step is continue-on-error, so this runs even when it failed and
+      # wrote nothing; an empty execution_file would make upload-artifact fail on a
+      # missing `path`, hence the output guard rather than if-no-files-found alone.
+      - name: Upload Claude execution log
+        if: github.event.pull_request.user.login != 'dependabot[bot]' && steps.review.outputs.execution_file != ''
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: claude-execution-log-pr-${{ github.event.pull_request.number }}
+          path: ${{ steps.review.outputs.execution_file }}
+          if-no-files-found: ignore
+          retention-days: 90
 
       - name: Notify on review failure
         if: github.event.pull_request.user.login != 'dependabot[bot]' && (steps.review.outcome == 'failure' || steps.review.outcome == 'cancelled')
