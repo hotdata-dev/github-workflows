@@ -1,0 +1,7 @@
+[
+  {"user":{"login":"claude[bot]","type":"Bot"},"state":"COMMENTED","commit_id":"a1111111111111111111111111111111111111aa","submitted_at":"2026-07-01T00:00:00Z"},
+  {"user":{"login":"claude[bot]","type":"Bot"},"state":"DISMISSED","commit_id":"a1111111111111111111111111111111111111aa","submitted_at":"2026-07-01T00:00:06Z"},
+  {"user":{"login":"claude[bot]","type":"Bot"},"state":"COMMENTED","commit_id":"b2222222222222222222222222222222222222bb","submitted_at":"2026-07-01T01:00:00Z"},
+  {"user":{"login":"claude[bot]","type":"Bot"},"state":"COMMENTED","commit_id":"b2222222222222222222222222222222222222bb","submitted_at":"2026-07-01T01:00:03Z"},
+  {"user":{"login":"claude[bot]","type":"Bot"},"state":"APPROVED","commit_id":"c3333333333333333333333333333333333333cc","submitted_at":"2026-07-01T01:00:09Z"}
+]
