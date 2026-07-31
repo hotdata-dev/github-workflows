@@ -159,14 +159,23 @@ jobs:
       # The review step is continue-on-error, so this runs even when it failed and
       # wrote nothing; an empty execution_file would make upload-artifact fail on a
       # missing `path`, hence the output guard rather than if-no-files-found alone.
+      # This step is diagnostic only and gates a required org-wide check, so it must
+      # never turn a passing review red: continue-on-error covers upload failures, and
+      # overwrite covers re-running a job in a run that already uploaded this name
+      # (v4+ artifacts are immutable, so a same-name upload is otherwise a conflict).
       - name: Upload Claude execution log
+        continue-on-error: true
         if: github.event.pull_request.user.login != 'dependabot[bot]' && steps.review.outputs.execution_file != ''
         uses: actions/upload-artifact@v7.0.1
         with:
           name: claude-execution-log-pr-${{ github.event.pull_request.number }}
           path: ${{ steps.review.outputs.execution_file }}
           if-no-files-found: ignore
-          retention-days: 90
+          overwrite: true
+          # Long enough to compare denial rates before and after the allowlist change
+          # (~100 review runs/week org-wide), short enough that a full-conversation log
+          # of every PR in the org is not sitting in billable storage for a quarter.
+          retention-days: 14
 
       - name: Notify on review failure
         if: github.event.pull_request.user.login != 'dependabot[bot]' && (steps.review.outcome == 'failure' || steps.review.outcome == 'cancelled')
