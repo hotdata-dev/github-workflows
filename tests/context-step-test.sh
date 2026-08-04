@@ -49,9 +49,9 @@ fi
 # Comments are allowed to discuss ${{ }}; code is not allowed to contain one this test
 # does not substitute, because an unsubstituted expression would run here as literal text
 # and hide whatever the real workflow splices in.
-if grep -vE '^\s*#' "$WORK/step.sh" | grep -q '\${{'; then
+if grep -vE '^[[:space:]]*#' "$WORK/step.sh" | grep -q '\${{'; then
   echo "FAIL: the step gained a \${{ }} interpolation this test does not substitute:" >&2
-  grep -nE '\${{' "$WORK/step.sh" | grep -vE ':\s*#' >&2
+  grep -nE '\${{' "$WORK/step.sh" | grep -vE ':[[:space:]]*#' >&2
   exit 1
 fi
 

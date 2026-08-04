@@ -112,13 +112,21 @@ expect_jq execution-log-denials.json '[.denied_commands[].n] | add' '3' \
 # projection emits is a literal in CMD_JQ. Nothing derived from the transcript can satisfy
 # it, so the artifact cannot grow a credential path, a search pattern, or a file name
 # without this failing first.
+# Both sides sorted, and sorted after they are assembled: GNU comm rejects unsorted input
+# outright where BSD comm quietly compares it anyway. The `["", "other"]` fallback in verb
+# matches the same pattern as the real pairs, so "other" arrives here as a label like any
+# other -- asserted below rather than assumed, since losing it would let an unrecognised
+# command through this check.
 vocabulary=$(printf '%s' "$CMD_JQ" | grep -o '", "[a-z /]*"\]' | sed 's/^", "//; s/"\]$//' | sort -u)
 if [ -z "$vocabulary" ]; then
   echo "FAIL vocabulary: no labels found in CMD_JQ, so the containment test proves nothing"
   failures=$((failures + 1))
+elif ! printf '%s\n' "$vocabulary" | grep -qx other; then
+  echo "FAIL vocabulary: no \"other\" fallback label in CMD_JQ"
+  failures=$((failures + 1))
 else
   emitted=$(project execution-log-denials.json | jq -r '[.commands[], .denied_commands[]] | .[].cmd' | sort -u)
-  unknown=$(comm -23 <(printf '%s\n' "$emitted") <(printf '%s\n' "$vocabulary" | grep -v '^other$'; echo other))
+  unknown=$(comm -23 <(printf '%s\n' "$emitted" | sort -u) <(printf '%s\n' "$vocabulary" | sort -u))
   if [ -z "$unknown" ]; then
     echo "ok   every emitted label comes from the CMD_JQ vocabulary"
   else
