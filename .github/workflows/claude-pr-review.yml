@@ -78,12 +78,25 @@ jobs:
       - name: Gather review context
         if: github.event.pull_request.user.login != 'dependabot[bot]'
         id: context
-        # Eight API reads feed the prompt now. A failure in this step *skips* the review
+        # Nine API reads feed the prompt now. A failure in this step *skips* the review
         # step, and with it the notify step's failure check, so the PR would get no review
         # and no explanation. Every command below is guarded individually; this is the
-        # backstop that keeps a bug in one block from costing the PR its review, at the cost
-        # of the prompt losing whichever blocks had not been written yet.
+        # backstop that keeps a bug in one block from costing the PR its review.
+        #
+        # What it costs when it fires: pr_context is appended to $GITHUB_OUTPUT once, at the
+        # end, so an abort anywhere before that leaves the output unset and the prompt gets
+        # an *empty* <pr_context> -- not a partial one. review_cycle and threads are written
+        # earlier and survive. Each degraded block carries a sentence saying what is
+        # missing, but a degraded step carries nothing, so the prompt tells the reviewer to
+        # fetch what it needs itself when the block is empty. Without that line the prompt
+        # would be telling it not to re-fetch context it never received.
         continue-on-error: true
+        # Explicitly, because the default for a run block is `bash -e {0}` -- no pipefail.
+        # This step is mostly `gh ... | jq` pipelines, and gh writes its error body to
+        # stdout, so without pipefail a failed fetch feeds its own error text to jq and the
+        # block renders whatever jq makes of it instead of the guarded fallback sentence.
+        # tests/context-step-test.sh runs the extracted script under the same shell.
+        shell: bash
         run: |
           PR_NUMBER=${{ github.event.pull_request.number }}
           REPO=${{ github.repository }}
@@ -96,6 +109,22 @@ jobs:
           CTX_MAX_BYTES=600000
           CTX="${RUNNER_TEMP}/pr-context.md"
           : > "$CTX"
+
+          # gh refuses a raw-text body containing ANSI colour unless told to allow escape
+          # sequences, and a diff or a job log earns an escape byte from any file holding
+          # terminal output -- this repository's own job-log fixtures do. That refusal and
+          # its --allow-escape-sequences opt-out arrived together in gh 2.97.0 as a security
+          # fix; ubuntu-latest ships 2.96.0, where the flag is an unknown-flag error and the
+          # refusal does not exist either. So every raw fetch tries the flag and falls back
+          # to the bare call: on 2.96 the first attempt fails and the second succeeds, on
+          # 2.97+ the first succeeds. Pinning either form breaks on the other, and the
+          # runner image updates weekly.
+          fetch_raw() {
+            RAW_OUT=$1
+            shift
+            gh "$@" --allow-escape-sequences > "$RAW_OUT" 2>/dev/null && return 0
+            gh "$@" > "$RAW_OUT" 2>/dev/null
+          }
 
           # Count distinct commits already reviewed, never review state: the org ruleset
           # sets dismiss_stale_reviews_on_push, so a push flips a prior APPROVED to
@@ -240,10 +269,7 @@ jobs:
           for JOB_ID in $JOB_IDS; do
             JOB_LOG="${RUNNER_TEMP}/job-${JOB_ID}.log"
             { echo; echo "### Failing job ${JOB_ID}"; } >> "$CTX"
-            # --allow-escape-sequences or gh refuses the body and writes nothing at all:
-            # job logs carry ANSI colour, and without the flag this is always "unavailable".
-            if ! gh api --allow-escape-sequences \
-              "repos/${REPO}/actions/jobs/${JOB_ID}/logs" > "$JOB_LOG" 2>/dev/null; then
+            if ! fetch_raw "$JOB_LOG" api "repos/${REPO}/actions/jobs/${JOB_ID}/logs"; then
               echo "(log unavailable)" >> "$CTX"
               continue
             fi
@@ -276,14 +302,22 @@ jobs:
             SINCE_FILE="${RUNNER_TEMP}/since-last-review.diff"
             # The compare API, not git: the checkout is fetch-depth 1, so no base branch and
             # no prior commit exists locally to diff against.
-            # --allow-escape-sequences on every call whose body is raw text rather than
-            # JSON: gh refuses such a body outright and writes nothing. A diff earns an
-            # escape byte from any fixture holding terminal output -- this repository's own
-            # job-log fixtures do -- and without the flag the most important block in the
-            # prompt goes missing behind a warning.
-            if gh api "repos/${REPO}/compare/${LAST_SHA}...${HEAD_SHA}" \
-              -H "Accept: application/vnd.github.diff" --allow-escape-sequences \
-              > "$SINCE_FILE" 2>/dev/null; then
+            #
+            # Ask for the JSON first and only use the diff when the comparison is a clean
+            # fast-forward. compare/A...B is three-dot, so it diffs from the *merge base* of
+            # the two, which equals "since A" only while the branch has done nothing but gain
+            # commits. After a rebase or a squash-and-force-push the old SHA usually stays
+            # reachable, so this call succeeds and returns the whole PR plus anything the
+            # rebase pulled in from upstream -- under a heading that says the opposite. A
+            # reviewer trusting that heading re-raises issues the author already settled, and
+            # SINCE_MAX can drop the part that genuinely is new. status is "ahead" only for
+            # the fast-forward case; "diverged" and "behind" fall through to the message.
+            COMPARE_STATUS_JQ='.status // "unknown"'
+            SINCE_STATUS=$(gh api "repos/${REPO}/compare/${LAST_SHA}...${HEAD_SHA}" 2>/dev/null \
+              | jq -r "$COMPARE_STATUS_JQ" 2>/dev/null) || SINCE_STATUS='unknown'
+            if [ "$SINCE_STATUS" = "ahead" ] \
+              && fetch_raw "$SINCE_FILE" api "repos/${REPO}/compare/${LAST_SHA}...${HEAD_SHA}" \
+              -H "Accept: application/vnd.github.diff"; then
               # awk, not `wc -l`: wc pads its count with spaces on BSD and the number
               # is interpolated into the notice below, not just compared.
               SINCE_LINES=$(awk 'END {print NR}' "$SINCE_FILE")
@@ -299,15 +333,17 @@ jobs:
               {
                 echo
                 echo "## Diff since your last review"
-                echo "Unavailable: ${LAST_SHA} could not be compared to ${HEAD_SHA}."
-                echo "The branch was probably force-pushed. Review the full diff instead."
+                echo "Unavailable: ${LAST_SHA} does not fast-forward to ${HEAD_SHA}"
+                echo "(comparison status: ${SINCE_STATUS})."
+                echo "The branch was rebased or force-pushed, so there is no meaningful"
+                echo "\"since last review\" diff. Review the full diff below instead, and"
+                echo "read the prior review comments to see what was already raised."
               } >> "$CTX"
             fi
           fi
 
           DIFF_FILE="${RUNNER_TEMP}/pr.diff"
-          if gh pr diff "$PR_NUMBER" --repo "$REPO" --allow-escape-sequences \
-            > "$DIFF_FILE" 2>/dev/null; then
+          if fetch_raw "$DIFF_FILE" pr diff "$PR_NUMBER" --repo "$REPO"; then
             DIFF_LINES=$(awk 'END {print NR}' "$DIFF_FILE")
             {
               echo
@@ -420,11 +456,14 @@ jobs:
           # norm strips the wrappers the reviewer puts in front of a real command (timeout,
           # cd .. &&, env VAR=x) so they do not all collapse into "other". verb returns the
           # first matching label or "other" -- the output is always one of these literals.
-          CMD_JQ='def norm: sub("^\\s+"; "") | sub("^timeout\\s+[0-9]+m?\\s+"; "") | sub("^cd\\s+[^&|;]+&&\\s*"; "") | sub("^env\\s+\\S+=\\S+\\s+"; ""); def verb: . as $c | ([[["^gh\\s+pr\\s+diff", "gh pr diff"], ["^gh\\s+pr\\s+view", "gh pr view"], ["^gh\\s+pr\\s+checks", "gh pr checks"], ["^gh\\s+pr\\s+review", "gh pr review"], ["^gh\\s+pr\\s+comment", "gh pr comment"], ["^gh\\s+api", "gh api"], ["^gh\\s", "gh other"], ["^git\\s+diff", "git diff"], ["^git\\s+log", "git log"], ["^git\\s+show", "git show"], ["^git\\s+blame", "git blame"], ["^git\\s", "git other"], ["^rg\\b", "rg"], ["^grep\\b", "grep"], ["^(fd|find)\\b", "find"], ["^(ls|tree)\\b", "ls"], ["^(sed|awk)\\b", "sed/awk"], ["^(cat|head|tail|wc)\\b", "cat/head/tail"], ["^(pytest|uv|python3?|cargo|npm|pnpm|yarn|bun|node|go|make|ruff|mypy|pyflakes)\\b", "run tests/build"]][] | select(.[0] as $re | $c | test($re))] | .[0] // ["", "other"]) | .[1]; def classify: {cmd: (norm | verb), compound: test("\\||&&|;|>")}; def toolname: if type == "string" and test("^[A-Za-z0-9_-]{1,64}$") then . else "unknown" end;'
+          CMD_JQ='def norm: sub("^\\s+"; "") | sub("^timeout\\s+[0-9]+m?\\s+"; "") | sub("^cd\\s+[^&|;]+&&\\s*"; "") | sub("^env\\s+\\S+=\\S+\\s+"; ""); def verb: . as $c | ([[["^gh\\s+pr\\s+diff", "gh pr diff"], ["^gh\\s+pr\\s+view", "gh pr view"], ["^gh\\s+pr\\s+checks", "gh pr checks"], ["^gh\\s+pr\\s+review", "gh pr review"], ["^gh\\s+pr\\s+comment", "gh pr comment"], ["^gh\\s+api", "gh api"], ["^gh\\s", "gh other"], ["^git\\s+diff", "git diff"], ["^git\\s+log", "git log"], ["^git\\s+show", "git show"], ["^git\\s+blame", "git blame"], ["^git\\s", "git other"], ["^rg\\b", "rg"], ["^grep\\b", "grep"], ["^(fd|find)\\b", "find"], ["^(ls|tree)\\b", "ls"], ["^(sed|awk)\\b", "sed/awk"], ["^(cat|head|tail|wc)\\b", "cat/head/tail"], ["^(pytest|uv|python3?|cargo|npm|pnpm|yarn|bun|node|go|make|ruff|mypy|pyflakes)\\b", "run tests/build"]][] | select(.[0] as $re | $c | test($re))] | .[0] // ["", "other"]) | .[1]; def unquoted: gsub("\"[^\"]*\""; "") | gsub("\u0027[^\u0027]*\u0027"; ""); def classify: {cmd: (norm | verb), compound: (unquoted | test("\\||&&|;|>"))}; def toolname: if type == "string" and test("^[A-Za-z0-9_-]{1,64}$") then . else "unknown" end;'
           # commands and denied_commands answer two different questions: what the reviewer
           # spends its Bash budget on, and which of those the allowlist refuses. compound is
           # carried separately because an allowlisted command still gets denied when it is
-          # piped or redirected, which no tool name or verb alone would show.
+          # piped or redirected, which no tool name or verb alone would show -- and it is
+          # tested against the command with quoted spans removed, because `rg -n \"a|b\"` is
+          # one allowlisted command and counting its alternation as a pipe would inflate
+          # exactly the number the flag exists to produce.
           TOOL_USAGE_JQ='{tool_calls: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name | toolname] | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), commands: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | (.input.command // "") | classify] | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), denials: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(.tool_name | toolname) | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), denied_commands: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(select(.tool_name == "Bash") | (.tool_input.command // "") | classify) | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), result: (([.[]? | select(.type=="result")] | last // {}) | {subtype, is_error, num_turns, duration_ms, total_cost_usd})}'
           jq "$CMD_JQ $TOOL_USAGE_JQ" "$EXECUTION_FILE" > "${RUNNER_TEMP}/claude-tool-usage.json"
         env:

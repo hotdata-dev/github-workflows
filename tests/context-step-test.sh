@@ -69,14 +69,41 @@ fail_if_marked() {
     "$1") exit 1 ;;
   esac
 }
-# Real gh writes nothing and exits 1 when a raw-text body contains ANSI colour and the flag
-# is absent. Every call that asks for raw text has to pass it.
+# GH_VERSION picks which gh this stub imitates, because the two behave oppositely and the
+# workflow has to work on both:
+#
+#   2.96 -- ubuntu-latest today. No escape-sequence refusal anywhere, and
+#           --allow-escape-sequences is an unknown flag on every subcommand.
+#   2.97 -- refuses a raw-text body containing ANSI colour unless the flag is passed. The
+#           refusal and the flag arrived together, as a security fix.
+#
+# A stub that only knew 2.97 is what let `gh pr diff --allow-escape-sequences` ship green:
+# it *required* a flag the runner rejects, so the suite passed on the broken invocation and
+# would have failed on the correct one. Unknown flags are rejected here for that reason --
+# a stub that accepts more than the real thing can only be wrong in the direction that
+# hides a bug.
+reject_unknown_flags() {
+  for arg in "$@"; do
+    case "$arg" in
+      --allow-escape-sequences)
+        if [ "$GH_VERSION" = "2.96" ]; then
+          echo "unknown flag: --allow-escape-sequences" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  done
+}
+# Raw-text bodies only. On 2.97 the flag is mandatory; on 2.96 it cannot be passed at all,
+# and no refusal exists.
 require_escape_flag() {
+  [ "$GH_VERSION" = "2.96" ] && return 0
   case "$1" in
     *--allow-escape-sequences*) ;;
     *) echo "the response contains terminal escape sequences" >&2; exit 1 ;;
   esac
 }
+reject_unknown_flags "$@"
 case "$args" in
   *"/reviews"*)            fail_if_marked reviews; cat "$FIXTURES/reviews-straddled-round.json" ;;
   *"/pulls/"*"/comments"*) fail_if_marked comments; echo '[]' ;;
@@ -94,8 +121,18 @@ case "$args" in
   # fixtures do -- the first PR to carry them lost its entire diff block to this.
   *"/compare/"*)
     fail_if_marked compare
-    require_escape_flag "$args"
-    printf 'diff --git a/api/app.py b/api/app.py\n+incremental change\n'
+    # The JSON probe and the diff body are the same endpoint, told apart by the Accept
+    # header. COMPARE_STATUS fakes what a rebase does to it: the old SHA stays reachable, so
+    # the call succeeds, but the comparison is no longer a fast-forward.
+    case "$args" in
+      *vnd.github.diff*)
+        require_escape_flag "$args"
+        printf 'diff --git a/api/app.py b/api/app.py\n+incremental change\n'
+        ;;
+      *)
+        printf '{"status":"%s","ahead_by":2,"behind_by":0}\n' "$COMPARE_STATUS"
+        ;;
+    esac
     ;;
   *"pr diff"*)
     fail_if_marked diff
@@ -123,6 +160,8 @@ run_step() {
     STUB_PR=172 \
     STUB_REPO=hotdata-dev/dlthubworker \
     STUB_JOB_LOG="${STUB_JOB_LOG:-job-log-django.txt}" \
+    GH_VERSION="${GH_VERSION:-2.96}" \
+    COMPARE_STATUS="${COMPARE_STATUS:-ahead}" \
     STUB_DIFF_LINES="${STUB_DIFF_LINES:-40}" \
     FAIL_ENDPOINT="${FAIL_ENDPOINT:-none}" \
     HEAD_SHA="${HEAD_SHA:-1d01475432236aa4fbca722aaaa2687c2b2e4947}" \
@@ -249,6 +288,55 @@ fi
 expect "$(STUB_JOB_LOG=pull-commits.json run_step)" "0" \
   "log with no error marker does not abort the step"
 expect_context 'Last 120 log lines' "log with no error marker falls back to a tail"
+
+# --- Since-last-review base ---------------------------------------------------------------
+
+# `compare/A...B` is three-dot, so it diffs from the *merge base* of A and B. While the
+# branch only gains commits that is the same thing as "since A". After a rebase or a
+# squash-and-force-push the old SHA usually stays reachable, so the call still succeeds and
+# returns everything since the old fork point -- the whole PR, plus whatever the rebase
+# pulled in from upstream -- under the heading "Diff since your last review". A reviewer
+# reading that re-raises settled issues, and the 2000-line cap can drop the part that
+# genuinely is new. Only a clean fast-forward earns the heading.
+COMPARE_STATUS=diverged run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when the comparison is not a fast-forward"
+if context | grep -q '^## Diff since your last review ('; then
+  echo "FAIL a diverged comparison was still labelled as the diff since the last review"
+  failures=$((failures + 1))
+else
+  echo "ok   diverged comparison is not labelled as the diff since the last review"
+fi
+expect_context 'force-pushed|rebased' \
+  "diverged comparison explains why it is unavailable"
+if context | grep -q '^+incremental change$'; then
+  echo "FAIL the diverged comparison's diff body was used anyway"
+  failures=$((failures + 1))
+else
+  echo "ok   the diverged comparison's diff body is not used"
+fi
+
+# "behind" is the other non-fast-forward: the reviewed SHA is ahead of the head, which
+# happens when a push is reverted. There is nothing new to show.
+COMPARE_STATUS=behind run_step > /dev/null
+if context | grep -q '^## Diff since your last review ('; then
+  echo "FAIL a behind comparison was labelled as the diff since the last review"
+  failures=$((failures + 1))
+else
+  echo "ok   behind comparison is not labelled as the diff since the last review"
+fi
+
+# --- gh version robustness ---------------------------------------------------------------
+
+# The three raw-text fetches have to land on both gh generations. This is the assertion the
+# suite was missing: it asserted the *flag*, which is a fact about one gh version, instead of
+# the outcome, which is the same on both -- the body reaches the prompt.
+for v in 2.96 2.97; do
+  GH_VERSION=$v run_step > "$WORK/code.txt"
+  expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on gh $v"
+  expect_context '^\+line 1$' "full diff body reaches the context on gh $v"
+  expect_context '^\+incremental change$' "since-last-review diff reaches the context on gh $v"
+  expect_context 'FAILED \(failures=1' "failing job log reaches the context on gh $v"
+done
 
 # --- Truncation --------------------------------------------------------------------------
 

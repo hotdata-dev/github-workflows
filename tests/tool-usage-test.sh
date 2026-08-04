@@ -108,6 +108,39 @@ expect_jq execution-log-denials.json \
 expect_jq execution-log-denials.json '[.denied_commands[].n] | add' '3' \
   "only Bash denials appear in denied_commands"
 
+# compound is tested against the raw command string, so anything that merely *looks* like
+# shell structure inflates it -- and a `|` inside quotes is a regex alternation, not a pipe.
+# `rg -n 'a|b'` is a single allowlisted command; counting it as compound corrupts the one
+# number the flag exists to produce, because the compound rows are read as "allowlisted but
+# refused for being chained". Quoted spans are removed before the test for that reason.
+compound_of() {
+  printf '%s' "$1" | jq -R -r "$CMD_JQ classify | .compound | tostring"
+}
+# expect_compound <command> <true|false> <description>
+expect_compound() {
+  local actual
+  actual=$(compound_of "$1")
+  if [ "$actual" = "$2" ]; then
+    echo "ok   $3"
+  else
+    echo "FAIL $3: expected compound=$2, got $actual for: $1"
+    failures=$((failures + 1))
+  fi
+}
+
+expect_compound "rg -n 'drive_write|promote_widened' src/" false \
+  "single-quoted alternation is not compound"
+expect_compound 'rg -n "LoadSource::Result|ResultStatus" src/' false \
+  "double-quoted alternation is not compound"
+expect_compound 'gh pr diff 21 | head -50' true \
+  "a real pipe is compound"
+expect_compound 'gh pr diff 21 > f.diff && wc -l f.diff' true \
+  "a redirect and chain are compound"
+expect_compound "rg -n 'a|b' src/ | head -20" true \
+  "an alternation plus a real pipe is still compound"
+expect_compound 'rg -n foo src/' false \
+  "a plain search is not compound"
+
 # The containment assertion, and the one that has to keep holding: every label the
 # projection emits is a literal in CMD_JQ. Nothing derived from the transcript can satisfy
 # it, so the artifact cannot grow a credential path, a search pattern, or a file name

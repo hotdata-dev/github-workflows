@@ -24,6 +24,7 @@ FILES_JQ=$(extract_jq FILES_JQ)
 CHECKS_JQ=$(extract_jq CHECKS_JQ)
 FAILING_JOBS_JQ=$(extract_jq FAILING_JOBS_JQ)
 LAST_REVIEW_JQ=$(extract_jq LAST_REVIEW_JQ)
+COMPARE_STATUS_JQ=$(extract_jq COMPARE_STATUS_JQ)
 ISSUE_COMMENTS_JQ=$(extract_jq ISSUE_COMMENTS_JQ)
 
 failures=0
@@ -164,6 +165,18 @@ expect "$(printf '[]' | jq -s -r "$LAST_REVIEW_JQ")" "" \
 # commit the author can have responded to yet.
 expect "$(printf '[{"user":{"login":"claude[bot]"},"commit_id":"aaa","submitted_at":null}]' | jq -s -r "$LAST_REVIEW_JQ")" \
   "" "unsubmitted review is not treated as the last review"
+
+# --- Comparison status --------------------------------------------------------------------
+
+# Only "ahead" means the reviewed SHA fast-forwards to the head, which is the one case where
+# a three-dot compare really is "everything since my last review". Anything else -- and
+# anything unreadable -- has to be distinguishable from it by the caller.
+expect "$(printf '{"status":"ahead","ahead_by":2}' | jq -r "$COMPARE_STATUS_JQ")" "ahead" \
+  "fast-forward comparison reports ahead"
+expect "$(printf '{"status":"diverged"}' | jq -r "$COMPARE_STATUS_JQ")" "diverged" \
+  "rebased comparison reports diverged"
+expect "$(printf '{}' | jq -r "$COMPARE_STATUS_JQ")" "unknown" \
+  "comparison with no status reports unknown, never ahead"
 
 # --- PR conversation ---------------------------------------------------------------------
 
