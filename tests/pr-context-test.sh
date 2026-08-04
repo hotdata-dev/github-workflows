@@ -77,6 +77,24 @@ added +12/-0 migrations/004_sync_state.sql" \
 expect "$(printf '[]' | jq -s -r "$FILES_JQ")" "No changed files reported." \
   "no changed files says so"
 
+# A field the API omitted must not render as a number. "+null/-null" is a claim about the
+# change, and the reviewer quotes these counts back in its comments; "unknown" and 0 are
+# visibly not measurements. Same reason the CheckRun name is defaulted below.
+expect "$(printf '[{"filename":"api/app.py"},{"status":"modified","additions":4,"deletions":1,"filename":"b.py"}]' | jq -s -r "$FILES_JQ")" \
+  "2 files, +4 -1
+unknown +0/-0 api/app.py
+modified +4/-1 b.py" \
+  "file entry missing its counts renders as unknown, not null"
+
+expect "$(printf '[{"status":"added","additions":1,"deletions":0}]' | jq -s -r "$FILES_JQ")" \
+  "1 files, +1 -0
+added +1/-0 (unnamed file)" \
+  "file entry missing its name says so rather than naming null"
+
+expect "$(printf '{"statusCheckRollup":[{"__typename":"CheckRun","conclusion":"FAILURE"}]}' | jq -r "$CHECKS_JQ")" \
+  "FAILURE  / (unnamed check)" \
+  "check missing its name does not become a check called null"
+
 # --- CI checks ---------------------------------------------------------------------------
 
 # Both rollup shapes have to render. CheckRun carries status/conclusion and a workflow name;

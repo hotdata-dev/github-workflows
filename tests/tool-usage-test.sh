@@ -135,6 +135,32 @@ else
   fi
 fi
 
+# Names are the other half of the boundary, and the half that reads as safe because tool
+# names look like a fixed set. They are not: `name` is whatever the assistant message
+# emitted, so a hallucinated tool whose name repeats a path it just read would be copied
+# into the artifact verbatim. toolname bounds them to the shape a real registry entry has.
+named=$(printf '%s' '[{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read /home/runner/work/_temp/git-credentials-82efe7dc.config","input":{}}]}}]' \
+  | jq -c "$CMD_JQ $TOOL_USAGE_JQ")
+if printf '%s' "$named" | grep -qF "git-credentials-82efe7dc.config"; then
+  echo "FAIL a tool name carrying a path reached the artifact: $named"
+  failures=$((failures + 1))
+elif printf '%s' "$named" | jq -e '.tool_calls == [{"name":"unknown","n":1}]' >/dev/null; then
+  echo "ok   out-of-shape tool name reduces to \"unknown\""
+else
+  echo "FAIL out-of-shape tool name did not reduce to \"unknown\": $named"
+  failures=$((failures + 1))
+fi
+
+# Same for a denial's tool_name, which comes from the same untrusted field.
+denied_named=$(printf '%s' '[{"type":"result","permission_denials":[{"tool_name":"Bash eC1hY2Nlc3MtdG9rZW46Z2hzX0ZBS0VUT0tFTg==","tool_input":{}}]}]' \
+  | jq -c "$CMD_JQ $TOOL_USAGE_JQ")
+if printf '%s' "$denied_named" | grep -qF "eC1hY2Nlc3MtdG9rZW46"; then
+  echo "FAIL a denial tool_name carrying a token reached the artifact: $denied_named"
+  failures=$((failures + 1))
+else
+  echo "ok   out-of-shape denial tool_name does not reach the artifact"
+fi
+
 # An unrecognised command must fall back to "other" and carry none of itself across. A bare
 # curl with a bearer token is the worst case: the whole command is the secret.
 leaky='[{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Bash","input":{"command":"curl -H \"Authorization: Bearer ghs_FAKETOKENFORTESTS\" https://api.github.com"}}]}}]'

@@ -149,10 +149,21 @@ jobs:
             end
           ') || THREADS='No prior review comments.'
 
+          # The prompt wraps both blocks below in <prior_review_comments> and <pr_context>
+          # and tells the reviewer to treat their contents as data. A PR body, a diff hunk,
+          # or a CI log containing the closing tag ends the block early, and everything the
+          # author wrote after it lands *outside* the marked region, where it reads as
+          # prompt. The tags are fixed strings, so neutralising them is complete: there is
+          # no other spelling the model parses as the same delimiter.
+          strip_block_tags() {
+            sed -e 's|<\(/\{0,1\}\)pr_context>|[\1pr_context]|g' \
+                -e 's|<\(/\{0,1\}\)prior_review_comments>|[\1prior_review_comments]|g'
+          }
+
           DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
           {
             echo "threads<<${DELIMITER}"
-            echo "$THREADS"
+            printf '%s\n' "$THREADS" | strip_block_tags
             echo "${DELIMITER}"
           } >> $GITHUB_OUTPUT
 
@@ -182,7 +193,9 @@ jobs:
 
           # status carries added/modified/removed/renamed, which the raw patch does not spell
           # out for renames, and the per-file counts let the reviewer budget its reading.
-          FILES_JQ='[.[][]] | if length == 0 then "No changed files reported." else "\(length) files, +\([.[].additions] | add) -\([.[].deletions] | add)", (.[] | "\(.status) +\(.additions)/-\(.deletions) \(.filename)") end'
+          # Every field defaulted: a payload missing .additions would otherwise render
+          # "+null", and the reviewer quotes these numbers back in review comments.
+          FILES_JQ='[.[][]] | if length == 0 then "No changed files reported." else "\(length) files, +\([.[].additions // 0] | add) -\([.[].deletions // 0] | add)", (.[] | "\(.status // "unknown") +\(.additions // 0)/-\(.deletions // 0) \(.filename // "(unnamed file)")") end'
           if FILES_JSON=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" --paginate); then
             FILES=$(printf '%s' "$FILES_JSON" | jq -s -r "$FILES_JQ" 2>/dev/null) \
               || FILES="Could not parse changed files."
@@ -195,7 +208,7 @@ jobs:
           # The reviewer cannot run tests -- no dependencies are installed and the allowlist
           # would refuse anyway -- but CI already ran them. Whether they passed is the one
           # fact it was asserting without evidence.
-          CHECKS_JQ='(.statusCheckRollup // []) | if length == 0 then "No checks reported." else map(if .__typename == "CheckRun" then "\(.conclusion // .status // "UNKNOWN") \(.workflowName // "") / \(.name)" else "\(.state // "UNKNOWN") \(.context // "status")" end) | sort | join("\n") end'
+          CHECKS_JQ='(.statusCheckRollup // []) | if length == 0 then "No checks reported." else map(if .__typename == "CheckRun" then "\(.conclusion // .status // "UNKNOWN") \(.workflowName // "") / \(.name // "(unnamed check)")" else "\(.state // "UNKNOWN") \(.context // "status")" end) | sort | join("\n") end'
           # Actions check runs carry the job id in detailsUrl; scan rather than capture so a
           # non-Actions check with no job id drops out instead of erroring.
           FAILING_JOBS_JQ='[(.statusCheckRollup // [])[] | select(.__typename == "CheckRun") | select((.conclusion // "") | test("FAILURE|TIMED_OUT|ACTION_REQUIRED")) | (.detailsUrl // "") | [scan("/job/([0-9]+)")] | flatten | .[0] // empty] | unique | .[0:3] | join(" ")'
@@ -263,8 +276,14 @@ jobs:
             SINCE_FILE="${RUNNER_TEMP}/since-last-review.diff"
             # The compare API, not git: the checkout is fetch-depth 1, so no base branch and
             # no prior commit exists locally to diff against.
+            # --allow-escape-sequences on every call whose body is raw text rather than
+            # JSON: gh refuses such a body outright and writes nothing. A diff earns an
+            # escape byte from any fixture holding terminal output -- this repository's own
+            # job-log fixtures do -- and without the flag the most important block in the
+            # prompt goes missing behind a warning.
             if gh api "repos/${REPO}/compare/${LAST_SHA}...${HEAD_SHA}" \
-              -H "Accept: application/vnd.github.diff" > "$SINCE_FILE" 2>/dev/null; then
+              -H "Accept: application/vnd.github.diff" --allow-escape-sequences \
+              > "$SINCE_FILE" 2>/dev/null; then
               # awk, not `wc -l`: wc pads its count with spaces on BSD and the number
               # is interpolated into the notice below, not just compared.
               SINCE_LINES=$(awk 'END {print NR}' "$SINCE_FILE")
@@ -287,7 +306,8 @@ jobs:
           fi
 
           DIFF_FILE="${RUNNER_TEMP}/pr.diff"
-          if gh pr diff "$PR_NUMBER" --repo "$REPO" > "$DIFF_FILE" 2>/dev/null; then
+          if gh pr diff "$PR_NUMBER" --repo "$REPO" --allow-escape-sequences \
+            > "$DIFF_FILE" 2>/dev/null; then
             DIFF_LINES=$(awk 'END {print NR}' "$DIFF_FILE")
             {
               echo
@@ -326,7 +346,7 @@ jobs:
           CTX_DELIMITER="PR_CONTEXT_$(openssl rand -hex 16)"
           {
             echo "pr_context<<${CTX_DELIMITER}"
-            cat "$CTX"
+            strip_block_tags < "$CTX"
             echo "${CTX_DELIMITER}"
           } >> $GITHUB_OUTPUT
         env:
@@ -400,12 +420,12 @@ jobs:
           # norm strips the wrappers the reviewer puts in front of a real command (timeout,
           # cd .. &&, env VAR=x) so they do not all collapse into "other". verb returns the
           # first matching label or "other" -- the output is always one of these literals.
-          CMD_JQ='def norm: sub("^\\s+"; "") | sub("^timeout\\s+[0-9]+m?\\s+"; "") | sub("^cd\\s+[^&|;]+&&\\s*"; "") | sub("^env\\s+\\S+=\\S+\\s+"; ""); def verb: . as $c | ([[["^gh\\s+pr\\s+diff", "gh pr diff"], ["^gh\\s+pr\\s+view", "gh pr view"], ["^gh\\s+pr\\s+checks", "gh pr checks"], ["^gh\\s+pr\\s+review", "gh pr review"], ["^gh\\s+pr\\s+comment", "gh pr comment"], ["^gh\\s+api", "gh api"], ["^gh\\s", "gh other"], ["^git\\s+diff", "git diff"], ["^git\\s+log", "git log"], ["^git\\s+show", "git show"], ["^git\\s+blame", "git blame"], ["^git\\s", "git other"], ["^rg\\b", "rg"], ["^grep\\b", "grep"], ["^(fd|find)\\b", "find"], ["^(ls|tree)\\b", "ls"], ["^(sed|awk)\\b", "sed/awk"], ["^(cat|head|tail|wc)\\b", "cat/head/tail"], ["^(pytest|uv|python3?|cargo|npm|pnpm|yarn|bun|node|go|make|ruff|mypy|pyflakes)\\b", "run tests/build"]][] | select(.[0] as $re | $c | test($re))] | .[0] // ["", "other"]) | .[1]; def classify: {cmd: (norm | verb), compound: test("\\||&&|;|>")};'
+          CMD_JQ='def norm: sub("^\\s+"; "") | sub("^timeout\\s+[0-9]+m?\\s+"; "") | sub("^cd\\s+[^&|;]+&&\\s*"; "") | sub("^env\\s+\\S+=\\S+\\s+"; ""); def verb: . as $c | ([[["^gh\\s+pr\\s+diff", "gh pr diff"], ["^gh\\s+pr\\s+view", "gh pr view"], ["^gh\\s+pr\\s+checks", "gh pr checks"], ["^gh\\s+pr\\s+review", "gh pr review"], ["^gh\\s+pr\\s+comment", "gh pr comment"], ["^gh\\s+api", "gh api"], ["^gh\\s", "gh other"], ["^git\\s+diff", "git diff"], ["^git\\s+log", "git log"], ["^git\\s+show", "git show"], ["^git\\s+blame", "git blame"], ["^git\\s", "git other"], ["^rg\\b", "rg"], ["^grep\\b", "grep"], ["^(fd|find)\\b", "find"], ["^(ls|tree)\\b", "ls"], ["^(sed|awk)\\b", "sed/awk"], ["^(cat|head|tail|wc)\\b", "cat/head/tail"], ["^(pytest|uv|python3?|cargo|npm|pnpm|yarn|bun|node|go|make|ruff|mypy|pyflakes)\\b", "run tests/build"]][] | select(.[0] as $re | $c | test($re))] | .[0] // ["", "other"]) | .[1]; def classify: {cmd: (norm | verb), compound: test("\\||&&|;|>")}; def toolname: if type == "string" and test("^[A-Za-z0-9_-]{1,64}$") then . else "unknown" end;'
           # commands and denied_commands answer two different questions: what the reviewer
           # spends its Bash budget on, and which of those the allowlist refuses. compound is
           # carried separately because an allowlisted command still gets denied when it is
           # piped or redirected, which no tool name or verb alone would show.
-          TOOL_USAGE_JQ='{tool_calls: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name] | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), commands: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | (.input.command // "") | classify] | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), denials: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(.tool_name // "unknown") | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), denied_commands: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(select(.tool_name == "Bash") | (.tool_input.command // "") | classify) | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), result: (([.[]? | select(.type=="result")] | last // {}) | {subtype, is_error, num_turns, duration_ms, total_cost_usd})}'
+          TOOL_USAGE_JQ='{tool_calls: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name | toolname] | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), commands: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | (.input.command // "") | classify] | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), denials: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(.tool_name | toolname) | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), denied_commands: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(select(.tool_name == "Bash") | (.tool_input.command // "") | classify) | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), result: (([.[]? | select(.type=="result")] | last // {}) | {subtype, is_error, num_turns, duration_ms, total_cost_usd})}'
           jq "$CMD_JQ $TOOL_USAGE_JQ" "$EXECUTION_FILE" > "${RUNNER_TEMP}/claude-tool-usage.json"
         env:
           # Via env, not a ${{ }} interpolation inside the script, so the path cannot be
