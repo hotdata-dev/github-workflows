@@ -7,37 +7,35 @@
 # Two jobs. First, the projection has to actually answer the question it exists for: the
 # action prints only permission_denials.length to the job log, so the denied tool *names*
 # live nowhere else and a change that drops them would be invisible until someone went
-# looking for data that was never collected.
+# looking for data that was never collected. Names turned out not to be enough -- 520 of
+# 567 denials in the first week were "Bash" -- so the projection labels commands too, and
+# the labels have to survive the same way.
 #
 # Second, and the reason this file is worth more than its assertions: the input is the full
 # conversation -- every tool input and every tool result. The runner has a readable git
 # credential (checkout persists one via includeIf into $RUNNER_TEMP/git-credentials-*.config)
 # and Read is unrestricted, so a transcript can contain a live token. ::add-mask:: scrubs the
 # job log but not artifacts. The leak assertions below hold the line that this artifact
-# carries names and counts only; widening the projection to "just the tool inputs too" is
-# exactly the change that would quietly publish a token.
+# carries names, counts, and labels drawn from a closed vocabulary -- never text from the
+# transcript. "Just the first token of the command" or "just the command prefix" is exactly
+# the change that would quietly publish a credential path, so the vocabulary assertion
+# below asserts the containment directly: every label in the artifact appears in CMD_JQ.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-WORKFLOW=.github/workflows/claude-pr-review.yml
+# shellcheck source=tests/lib.sh
+. tests/lib.sh
 
-TOOL_USAGE_JQ=$(sed -n "s/^ *TOOL_USAGE_JQ='\(.*\)'\$/\1/p" "$WORKFLOW")
-if [ -z "$TOOL_USAGE_JQ" ]; then
-  echo "FAIL: no TOOL_USAGE_JQ='...' assignment found in $WORKFLOW" >&2
-  exit 1
-fi
-if [ "$(printf '%s\n' "$TOOL_USAGE_JQ" | wc -l)" -ne 1 ]; then
-  echo "FAIL: more than one TOOL_USAGE_JQ assignment in $WORKFLOW" >&2
-  exit 1
-fi
+CMD_JQ=$(extract_jq CMD_JQ)
+TOOL_USAGE_JQ=$(extract_jq TOOL_USAGE_JQ)
 
 failures=0
 
-# project <fixture> -- run the shipped filter over a fixture
+# project <fixture> -- run the shipped filter over a fixture, composed as the workflow does
 project() {
-  jq "$TOOL_USAGE_JQ" "tests/fixtures/$1"
+  jq "$CMD_JQ $TOOL_USAGE_JQ" "tests/fixtures/$1"
 }
 
 # expect_jq <fixture> <jq expression> <expected> <description>
@@ -69,14 +67,14 @@ expect_absent() {
   fi
 }
 
-# The denial names are the whole point: two Grep denials and one Glob, ranked.
+# The denial names: three Bash, two Grep, one Glob, ranked.
 expect_jq execution-log-denials.json '.denials' \
-  '[{"name":"Grep","n":2},{"name":"Glob","n":1}]' \
+  '[{"name":"Bash","n":3},{"name":"Grep","n":2},{"name":"Glob","n":1}]' \
   "denied tool names survive with counts"
 
 # Calls are counted per tool, most-used first, independent of whether they were denied.
 expect_jq execution-log-denials.json '.tool_calls[0]' \
-  '{"name":"Grep","n":2}' \
+  '{"name":"Bash","n":5}' \
   "tool calls counted and ranked"
 expect_jq execution-log-denials.json '[.tool_calls[].name] | sort' \
   '["Bash","Grep","Read"]' \
@@ -85,6 +83,64 @@ expect_jq execution-log-denials.json '[.tool_calls[].name] | sort' \
 # Enough of the result message to compare runs before and after an allowlist change.
 expect_jq execution-log-denials.json '.result.num_turns' '19' "turn count carried through"
 expect_jq execution-log-denials.json '.result.subtype' '"success"' "result subtype carried through"
+
+# Bash calls are labelled, and compound forms are counted apart from bare ones. `gh pr diff`
+# appears twice for that reason: allowlisted on its own, refused the moment it is redirected
+# into a file and chained -- which is why the artifact has to distinguish them.
+expect_jq execution-log-denials.json \
+  '[.commands[] | .cmd + (if .compound then " (compound)" else "" end)] | sort' \
+  '["cat/head/tail","gh pr diff","gh pr diff (compound)","rg","run tests/build"]' \
+  "Bash commands labelled, compound forms kept separate"
+
+# `timeout 900 uv run pytest` has to reach "run tests/build" rather than "other": the
+# wrappers the reviewer puts in front of a command are what norm exists to strip.
+expect_jq execution-log-denials.json \
+  '[.commands[] | select(.cmd == "run tests/build")] | length' '1' \
+  "timeout wrapper stripped before labelling"
+
+# The denied subset is the actionable half: what the allowlist is actually costing.
+expect_jq execution-log-denials.json \
+  '[.denied_commands[] | .cmd + (if .compound then " (compound)" else "" end)] | sort' \
+  '["cat/head/tail","gh pr diff (compound)","run tests/build"]' \
+  "denied Bash commands labelled"
+
+# Non-Bash denials carry no command label -- there is no command to label.
+expect_jq execution-log-denials.json '[.denied_commands[].n] | add' '3' \
+  "only Bash denials appear in denied_commands"
+
+# The containment assertion, and the one that has to keep holding: every label the
+# projection emits is a literal in CMD_JQ. Nothing derived from the transcript can satisfy
+# it, so the artifact cannot grow a credential path, a search pattern, or a file name
+# without this failing first.
+vocabulary=$(printf '%s' "$CMD_JQ" | grep -o '", "[a-z /]*"\]' | sed 's/^", "//; s/"\]$//' | sort -u)
+if [ -z "$vocabulary" ]; then
+  echo "FAIL vocabulary: no labels found in CMD_JQ, so the containment test proves nothing"
+  failures=$((failures + 1))
+else
+  emitted=$(project execution-log-denials.json | jq -r '[.commands[], .denied_commands[]] | .[].cmd' | sort -u)
+  unknown=$(comm -23 <(printf '%s\n' "$emitted") <(printf '%s\n' "$vocabulary" | grep -v '^other$'; echo other))
+  if [ -z "$unknown" ]; then
+    echo "ok   every emitted label comes from the CMD_JQ vocabulary"
+  else
+    echo "FAIL emitted labels outside the CMD_JQ vocabulary: $unknown"
+    failures=$((failures + 1))
+  fi
+fi
+
+# An unrecognised command must fall back to "other" and carry none of itself across. A bare
+# curl with a bearer token is the worst case: the whole command is the secret.
+leaky='[{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Bash","input":{"command":"curl -H \"Authorization: Bearer ghs_FAKETOKENFORTESTS\" https://api.github.com"}}]}}]'
+leaked=$(printf '%s' "$leaky" | jq -c "$CMD_JQ $TOOL_USAGE_JQ")
+if printf '%s' "$leaked" | grep -qF "ghs_FAKETOKENFORTESTS" \
+  || printf '%s' "$leaked" | grep -qF "curl"; then
+  echo "FAIL unrecognised command leaked into the projection: $leaked"
+  failures=$((failures + 1))
+elif printf '%s' "$leaked" | jq -e '.commands == [{"cmd":"other","compound":false,"n":1}]' >/dev/null; then
+  echo "ok   unrecognised command reduces to \"other\""
+else
+  echo "FAIL unrecognised command did not reduce to \"other\": $leaked"
+  failures=$((failures + 1))
+fi
 
 # The leak assertions. The fixture has the reviewer reading the runner's git credentials
 # file, which is the concrete path by which a token reaches the transcript.
@@ -100,6 +156,12 @@ expect_absent execution-log-denials.json \
 expect_absent execution-log-denials.json \
   "retention-days" \
   "search patterns from a denied call do not reach the artifact"
+expect_absent execution-log-denials.json \
+  "ANTHROPIC_API_KEY" \
+  "search patterns inside a Bash command do not reach the artifact"
+expect_absent execution-log-denials.json \
+  "pr21.diff" \
+  "file names inside a Bash command do not reach the artifact"
 
 # A clean run: no denials, and the MCP inline-comment tool counted like any other.
 expect_jq execution-log-clean.json '.denials' '[]' "clean run reports no denials"
@@ -111,14 +173,16 @@ expect_jq execution-log-clean.json '[.tool_calls[].name] | sort' \
 # continue-on-error, but the filter should still produce a usable artifact rather than
 # abort, so the tool calls made before the run died are not lost.
 expect_jq execution-log-truncated.json '.denials' '[]' "log with no result message yields no denials"
+expect_jq execution-log-truncated.json '.denied_commands' '[]' \
+  "log with no result message yields no denied commands"
 expect_jq execution-log-truncated.json '.tool_calls' '[{"name":"Read","n":1}]' \
   "tool calls survive a log with no result message"
 expect_jq execution-log-truncated.json '.result.num_turns' 'null' \
   "missing result message yields null fields, not an error"
 
 # Degenerate input must not crash the filter.
-empty=$(printf '[]' | jq -c "$TOOL_USAGE_JQ")
-if [ "$empty" = '{"tool_calls":[],"denials":[],"result":{"subtype":null,"is_error":null,"num_turns":null,"duration_ms":null,"total_cost_usd":null}}' ]; then
+empty=$(printf '[]' | jq -c "$CMD_JQ $TOOL_USAGE_JQ")
+if [ "$empty" = '{"tool_calls":[],"commands":[],"denials":[],"denied_commands":[],"result":{"subtype":null,"is_error":null,"num_turns":null,"duration_ms":null,"total_cost_usd":null}}' ]; then
   echo "ok   empty log projects to empty counts"
 else
   echo "FAIL empty log: got $empty"

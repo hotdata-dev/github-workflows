@@ -36,15 +36,17 @@ explanation.
 ### Tool usage artifact
 
 Each run attaches a `claude-tool-usage-pr-<number>` artifact (14-day retention): tool call counts,
-denied tool names, and the run's turn count and cost. It exists to diagnose permission denials
-against the workflow's `--allowedTools` list, since the job log records only the number of denials,
-never which tools were refused.
+Bash command labels with a compound flag, the denied subset of both, and the run's turn count and
+cost. It exists to diagnose permission denials against the workflow's `--allowedTools` list, since
+the job log records only the number of denials, never what was refused. Tool names alone proved
+insufficient — 520 of 567 denials in the first week were `Bash`, which is every command there is.
 
 The artifact is a projection of the action's execution log, never the log itself — that file is the
 full conversation, and the runner holds a git credential the reviewer can read, which artifacts
-(unlike job logs) would not mask. `TOOL_USAGE_JQ` in the workflow emits names and counts only, and
-`tests/tool-usage-test.sh` asserts that tool inputs, tool results, and repository contents cannot
-reach the artifact. Both the projection and the upload are non-fatal.
+(unlike job logs) would not mask. Command labels come from the fixed vocabulary in `CMD_JQ`, never
+from the transcript, so no path, search pattern, or credential can ride along in a "command prefix".
+`tests/tool-usage-test.sh` asserts that containment directly. Both the projection and the upload are
+non-fatal.
 
 ## Setup
 

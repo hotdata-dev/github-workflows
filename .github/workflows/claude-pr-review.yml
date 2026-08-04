@@ -366,21 +366,23 @@ jobs:
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(rg:*),Read,Grep,Glob"
 
       # Grep/Glob above were added because 64% of runs (256/400 sampled) hit at least
-      # one permission denial — 1,562 denials across 7,819 turns. Search is the only
-      # tool class the prompt's "read affected files for context" step needs that the
-      # allowlist withheld. That is a hypothesis, and this is how it gets checked: the
-      # action writes the full conversation to execution_file but prints only
-      # permission_denials.length to the job log (and the check-run summary is empty
-      # under track_progress: false), so the denied tool *names* exist nowhere a later
-      # run can read, and the file itself dies with the runner.
+      # one permission denial — 1,562 denials across 7,819 turns. Search was the leading
+      # hypothesis for what the allowlist withheld, and the first week of these artifacts
+      # refuted it: 86% of 109 runs still hit a denial, 5.2 per run, and in runtimedb the
+      # rate went up. The artifact could not say why, because tool *names* are not the
+      # answer -- 520 of 567 denials were "Bash", and Bash is every command there is.
       #
-      # Never upload that file as-is. It holds every tool input and result, the runner has
-      # a readable git credential (checkout persists one via includeIf into
+      # So the projection carries a command label now, and the labels come from the fixed
+      # vocabulary in CMD_JQ, never from the transcript. That distinction is the whole
+      # design. Never upload the execution log as-is: it holds every tool input and result,
+      # the runner has a readable git credential (checkout persists one via includeIf into
       # $RUNNER_TEMP/git-credentials-*.config), Read is unrestricted, and ::add-mask::
-      # scrubs the job log but not artifacts -- so a raw upload turns anything the
-      # reviewer happened to read into a downloadable file. Tool names and counts answer
-      # the allowlist question by themselves, so project to those and upload only that.
-      # The filter below emits no tool input and no result body by construction.
+      # scrubs the job log but not artifacts -- so a raw upload turns anything the reviewer
+      # happened to read into a downloadable file. A prefix of the command string would be
+      # the same leak in miniature: `cat /home/runner/work/_temp/git-credentials-*.config`
+      # is a path, and paths are what the leak assertions in tests/tool-usage-test.sh exist
+      # to keep out. Matching each command against a closed set of labels and emitting the
+      # label bounds the output to strings this file already contains.
       #
       # The review step is continue-on-error so a failed review still reaches the notify
       # step; empty execution_file means it wrote nothing, hence the output guard. Both
@@ -391,10 +393,20 @@ jobs:
         continue-on-error: true
         if: github.event.pull_request.user.login != 'dependabot[bot]' && steps.review.outputs.execution_file != ''
         run: |
-          # Kept as a single-line assignment so tests/tool-usage-test.sh can extract and
-          # exercise the shipped expression rather than a copy of it.
-          TOOL_USAGE_JQ='{tool_calls: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name] | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), denials: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(.tool_name // "unknown") | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), result: (([.[]? | select(.type=="result")] | last // {}) | {subtype, is_error, num_turns, duration_ms, total_cost_usd})}'
-          jq "$TOOL_USAGE_JQ" "$EXECUTION_FILE" > "${RUNNER_TEMP}/claude-tool-usage.json"
+          # Both kept as single-line assignments so tests/tool-usage-test.sh can extract and
+          # exercise the shipped expressions rather than copies of them, and composed the
+          # same way there: jq "$CMD_JQ $TOOL_USAGE_JQ".
+          #
+          # norm strips the wrappers the reviewer puts in front of a real command (timeout,
+          # cd .. &&, env VAR=x) so they do not all collapse into "other". verb returns the
+          # first matching label or "other" -- the output is always one of these literals.
+          CMD_JQ='def norm: sub("^\\s+"; "") | sub("^timeout\\s+[0-9]+m?\\s+"; "") | sub("^cd\\s+[^&|;]+&&\\s*"; "") | sub("^env\\s+\\S+=\\S+\\s+"; ""); def verb: . as $c | ([[["^gh\\s+pr\\s+diff", "gh pr diff"], ["^gh\\s+pr\\s+view", "gh pr view"], ["^gh\\s+pr\\s+checks", "gh pr checks"], ["^gh\\s+pr\\s+review", "gh pr review"], ["^gh\\s+pr\\s+comment", "gh pr comment"], ["^gh\\s+api", "gh api"], ["^gh\\s", "gh other"], ["^git\\s+diff", "git diff"], ["^git\\s+log", "git log"], ["^git\\s+show", "git show"], ["^git\\s+blame", "git blame"], ["^git\\s", "git other"], ["^rg\\b", "rg"], ["^grep\\b", "grep"], ["^(fd|find)\\b", "find"], ["^(ls|tree)\\b", "ls"], ["^(sed|awk)\\b", "sed/awk"], ["^(cat|head|tail|wc)\\b", "cat/head/tail"], ["^(pytest|uv|python3?|cargo|npm|pnpm|yarn|bun|node|go|make|ruff|mypy|pyflakes)\\b", "run tests/build"]][] | select(.[0] as $re | $c | test($re))] | .[0] // ["", "other"]) | .[1]; def classify: {cmd: (norm | verb), compound: test("\\||&&|;|>")};'
+          # commands and denied_commands answer two different questions: what the reviewer
+          # spends its Bash budget on, and which of those the allowlist refuses. compound is
+          # carried separately because an allowlisted command still gets denied when it is
+          # piped or redirected, which no tool name or verb alone would show.
+          TOOL_USAGE_JQ='{tool_calls: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name] | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), commands: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | (.input.command // "") | classify] | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), denials: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(.tool_name // "unknown") | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), denied_commands: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(select(.tool_name == "Bash") | (.tool_input.command // "") | classify) | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), result: (([.[]? | select(.type=="result")] | last // {}) | {subtype, is_error, num_turns, duration_ms, total_cost_usd})}'
+          jq "$CMD_JQ $TOOL_USAGE_JQ" "$EXECUTION_FILE" > "${RUNNER_TEMP}/claude-tool-usage.json"
         env:
           # Via env, not a ${{ }} interpolation inside the script, so the path cannot be
           # spliced into the shell command.
