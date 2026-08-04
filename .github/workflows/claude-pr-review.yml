@@ -279,7 +279,15 @@ jobs:
             fi
             # The *first* error marker: later steps in the same job add their own, and the
             # failing step's is the one with the cause above it.
-            ERR_LINE=$(grep -n '##\[error\]' "$JOB_LOG" | head -1 | cut -d: -f1) || ERR_LINE=''
+            #
+            # -m1 rather than `| head -1`: with pipefail, head closing the pipe after one
+            # line sends grep SIGPIPE, grep exits 141, and the guard below swallows it as
+            # "no error marker" -- so the window silently becomes a 120-line tail. Whether
+            # it fires depends on how much grep has buffered, so it misses the small logs
+            # and hits the ones with a marker per diagnostic (tsc, clippy, eslint), which
+            # are exactly the logs where the first-error window is worth the most. -m1 stops
+            # grep at the first match and drops the pipe stage that made the race possible.
+            ERR_LINE=$(grep -n -m1 '##\[error\]' "$JOB_LOG" | cut -d: -f1) || ERR_LINE=''
             if [ -n "$ERR_LINE" ]; then
               START=$((ERR_LINE - LOG_WINDOW + 1))
               if [ "$START" -lt 1 ]; then START=1; fi
