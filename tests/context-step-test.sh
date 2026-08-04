@@ -140,7 +140,7 @@ case "$args" in
   *"pr diff"*)
     fail_if_marked diff
     require_escape_flag "$args"
-    seq 1 "$STUB_DIFF_LINES" | sed 's/^/+line /'
+    awk -v n="$STUB_DIFF_LINES" 'BEGIN { for (i = 1; i <= n; i++) print "+line " i }'
     ;;
   *) echo "gh stub: unhandled args: $args" >&2; exit 1 ;;
 esac
@@ -390,6 +390,14 @@ done
 expect "$(STUB_DIFF_LINES=4000 run_step)" "0" "step exits 0 on an oversized diff"
 expect_context '\(truncated: first 3000 of 4000 lines' "oversized diff truncated with a notice"
 expect "$(grep -c '^+line ' "$CTX_FILE")" "3000" "truncated diff carries exactly the cap"
+
+# An empty body under a heading is a claim: "## Full diff" with nothing beneath it reads as
+# "nothing changed", and the reviewer has been told not to re-fetch what it was given. The
+# fetch succeeding with no body is not the same fact as the PR having no changes, so it has
+# to say which one happened.
+STUB_DIFF_LINES=0 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on an empty diff"
+expect_context 'came back empty' "an empty diff says so rather than showing a bare heading"
 
 # --- Degradation --------------------------------------------------------------------------
 

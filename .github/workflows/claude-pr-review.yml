@@ -356,9 +356,17 @@ jobs:
             {
               echo
               echo "## Full diff"
-              head -n "$DIFF_MAX" "$DIFF_FILE"
-              if [ "$DIFF_LINES" -gt "$DIFF_MAX" ]; then
-                echo "(truncated: first ${DIFF_MAX} of ${DIFF_LINES} lines; run gh pr diff for the rest)"
+              # A heading with nothing under it is a claim, and the wrong one: a fetch that
+              # succeeded with no body is not the same fact as a PR with no changes, and the
+              # prompt has just told the reviewer not to re-fetch what it was given.
+              if [ "$DIFF_LINES" -eq 0 ]; then
+                echo "The diff came back empty. That is unusual for a pull request; treat it"
+                echo "as missing rather than as \"nothing changed\" and run gh pr diff."
+              else
+                head -n "$DIFF_MAX" "$DIFF_FILE"
+                if [ "$DIFF_LINES" -gt "$DIFF_MAX" ]; then
+                  echo "(truncated: first ${DIFF_MAX} of ${DIFF_LINES} lines; run gh pr diff for the rest)"
+                fi
               fi
             } >> "$CTX"
           else
