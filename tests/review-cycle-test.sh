@@ -14,23 +14,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-WORKFLOW=.github/workflows/claude-pr-review.yml
-
-# extract_jq <shell variable name> -- pull a single-quoted jq program out of the workflow
-extract_jq() {
-  local name=$1 prog
-  prog=$(sed -n "s/^ *$name='\(.*\)'\$/\1/p" "$WORKFLOW")
-  if [ -z "$prog" ]; then
-    echo "FAIL: no $name='...' assignment found in $WORKFLOW" >&2
-    exit 1
-  fi
-  if [ "$(printf '%s\n' "$prog" | wc -l)" -ne 1 ]; then
-    echo "FAIL: more than one $name assignment in $WORKFLOW:" >&2
-    printf '%s\n' "$prog" >&2
-    exit 1
-  fi
-  printf '%s' "$prog"
-}
+# shellcheck source=tests/lib.sh
+. tests/lib.sh
 
 CYCLE_JQ=$(extract_jq CYCLE_JQ)
 DRIFT_JQ=$(extract_jq DRIFT_JQ)

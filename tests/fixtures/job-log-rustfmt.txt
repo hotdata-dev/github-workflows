@@ -1,0 +1,25 @@
+2026-08-04T19:05:40.4211946Z LLVM version: 22.1.6
+2026-08-04T19:05:40.4232896Z ##[end-action id=__dtolnay_rust-toolchain.__run_10;outcome=success;conclusion=success;duration_ms=32]
+2026-08-04T19:05:40.4310970Z ##[group]Run cargo fmt --check
+2026-08-04T19:05:40.4311603Z [36;1mcargo fmt --check[0m
+2026-08-04T19:05:40.4360660Z shell: /usr/bin/bash -e {0}
+2026-08-04T19:05:40.4361236Z env:
+2026-08-04T19:05:40.4361760Z   CARGO_HOME: /home/runner/.cargo
+2026-08-04T19:05:40.4362361Z   CARGO_INCREMENTAL: 0
+2026-08-04T19:05:40.4362906Z   CARGO_TERM_COLOR: always
+2026-08-04T19:05:40.4363456Z ##[endgroup]
+2026-08-04T19:05:40.7592252Z Diff in /home/runner/work/hotdata-cli/hotdata-cli/src/commands/ingest.rs:1895:
+2026-08-04T19:05:40.7594070Z          off.format = Some("jsonl".into());
+2026-08-04T19:05:40.7595111Z          let req_off = build_create_request(&e, off, None).unwrap();
+2026-08-04T19:05:40.7596238Z          assert!(!req_off.continuous);
+2026-08-04T19:05:40.7601815Z -        assert!(!serde_json::to_string(&req_off).unwrap().contains("continuous"));
+2026-08-04T19:05:40.7602611Z +        assert!(
+2026-08-04T19:05:40.7603184Z +            !serde_json::to_string(&req_off)
+2026-08-04T19:05:40.7603921Z +                .unwrap()
+2026-08-04T19:05:40.7604495Z +                .contains("continuous")
+2026-08-04T19:05:40.7605063Z +        );
+2026-08-04T19:05:40.7605533Z      }
+2026-08-04T19:05:40.7606009Z  
+2026-08-04T19:05:40.7606781Z      #[test]
+2026-08-04T19:05:40.8553302Z ##[error]Process completed with exit code 1.
+2026-08-04T19:05:40.8743240Z Post job cleanup.

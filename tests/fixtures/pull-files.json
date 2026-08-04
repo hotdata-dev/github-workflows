@@ -1,0 +1,35 @@
+[
+  {
+    "sha": "9e809bcf",
+    "filename": ".github/workflows/build.yml",
+    "status": "modified",
+    "additions": 3,
+    "deletions": 0,
+    "changes": 3
+  },
+  {
+    "sha": "4b476fc9",
+    "filename": "api/app.py",
+    "status": "modified",
+    "additions": 105,
+    "deletions": 7,
+    "changes": 112
+  },
+  {
+    "sha": "3eed8dc1",
+    "filename": "connectors/files/__init__.py",
+    "status": "renamed",
+    "previous_filename": "connectors/filesystem.py",
+    "additions": 219,
+    "deletions": 3,
+    "changes": 222
+  },
+  {
+    "sha": "aa11bb22",
+    "filename": "migrations/004_sync_state.sql",
+    "status": "added",
+    "additions": 12,
+    "deletions": 0,
+    "changes": 12
+  }
+]
