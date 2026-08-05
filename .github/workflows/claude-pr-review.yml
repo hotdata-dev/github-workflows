@@ -106,7 +106,19 @@ jobs:
           DIFF_MAX=3000
           SINCE_MAX=2000
           LOG_WINDOW=120
-          CTX_MAX_BYTES=600000
+          # Byte budgets, split across the step's two outputs rather than applied to one of
+          # them. threads is its own output written before the context file, so a cap that
+          # only measured the context bounded nothing: 400 inline comments rendered 1.1 MB of
+          # threads on their own. The total here is deliberately far below any plausible
+          # runner limit -- the largest PR reviewed across the org in a week rendered about
+          # 150 KB -- because the runner accounts for output size in UTF-16, so a byte count
+          # here is not the number it checks against.
+          THREADS_MAX_BYTES=100000
+          CTX_MAX_BYTES=200000
+          # One job log can be mostly a single line: LOG_WINDOW counts lines and a CI log
+          # line has no length limit, so a base64 or JSON dump next to the first error marker
+          # would otherwise consume the whole context ahead of the diff.
+          LOG_MAX_BYTES=40000
           CTX="${RUNNER_TEMP}/pr-context.md"
           : > "$CTX"
 
@@ -119,6 +131,17 @@ jobs:
           # to the bare call: on 2.96 the first attempt fails and the second succeeds, on
           # 2.97+ the first succeeds. Pinning either form breaks on the other, and the
           # runner image updates weekly.
+          # head -c against a *file*, never a pipe: `sed ... | head -c` closes the pipe early
+          # and SIGPIPE takes the producer down under pipefail, which is the shape that has
+          # already cost this step its error window once.
+          cap_file() {
+            if [ "$(wc -c < "$1" | tr -d " ")" -gt "$2" ]; then
+              head -c "$2" "$1" > "$1.cut"
+              mv "$1.cut" "$1"
+              echo "($3)" >> "$1"
+            fi
+          }
+
           fetch_raw() {
             RAW_OUT=$1
             shift
@@ -140,8 +163,21 @@ jobs:
           # Never fail the review over the cycle number; degrade to 1, but say so. gh
           # writes its error body to stdout, so an unguarded pipe into jq aborts the step
           # under `bash -e` and skips the failure-notification step below.
+          # CTX_WARNINGS collects the degradations the *model* has to know about, as opposed
+          # to the ones only an operator cares about. The distinction is whether the fallback
+          # is blank or is an assertion: "Could not read the diff." is visibly missing data,
+          # but "REVIEW CYCLE: 1" and "No prior review comments." are claims, and a failed
+          # read makes them false ones.
+          WARN_FILE="${RUNNER_TEMP}/ctx-warnings.md"
+          : > "$WARN_FILE"
           if ! REVIEWS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate); then
             echo "::warning::Could not read prior reviews; treating this as review cycle 1."
+            {
+              echo "- The prior reviews could not be read, so the REVIEW CYCLE number in this"
+              echo "  prompt may be wrong: it defaults to 1. If this is not really your first"
+              echo "  review, treat the cycle ladder as unknown, and do not take the cycle"
+              echo "  number as evidence that nothing was raised before."
+            } >> "$WARN_FILE"
             REVIEWS=''
           fi
           CYCLE=$(printf '%s' "$REVIEWS" | jq -s "$CYCLE_JQ" 2>/dev/null) || CYCLE=''
@@ -160,10 +196,24 @@ jobs:
           # Same guard as the counter above: unguarded `gh api | jq` aborts the step, and a
           # failure here *skips* the review step, so the notify step's failure check never
           # fires and the PR gets no review and no explanation.
+          COMMENTS_OK=1
           if ! COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --paginate); then
+            COMMENTS_OK=0
             echo "::warning::Could not read prior review comments; reviewing without them."
+            {
+              echo "- The prior inline review comments could not be read. That block is empty"
+              echo "  because the fetch failed, not because there were none. Do not conclude"
+              echo "  that no feedback was given; read the threads with gh pr view before"
+              echo "  re-raising anything."
+            } >> "$WARN_FILE"
             COMMENTS=''
           fi
+          # "No prior review comments." is only true when the fetch worked and returned
+          # none. Saying it after a failed fetch is the same false claim as an empty CI block
+          # reading as a green one, and it is the claim the cycle ladder acts on.
+          if [ "$COMMENTS_OK" -eq 0 ]; then
+            THREADS='Unavailable: the prior inline review comments could not be read. This block is empty because the fetch failed, not because there were none.'
+          else
           THREADS=$(printf '%s' "$COMMENTS" | jq -s -r '
             (add // []) | sort_by(.created_at) |
             if length == 0 then "No prior review comments."
@@ -174,9 +224,10 @@ jobs:
               (if .line then "Line: \(.line)" else empty end),
               (if .in_reply_to_id then "Reply to #\(.in_reply_to_id)" else "Thread #\(.id)" end),
               "",
-              .body
+              ((.body // "")[0:3000])
             end
-          ') || THREADS='No prior review comments.'
+          ') || THREADS='Unavailable: the prior inline review comments could not be parsed.'
+          fi
 
           # The prompt wraps both blocks below in <prior_review_comments> and <pr_context>
           # and tells the reviewer to treat their contents as data. A PR body, a diff hunk,
@@ -184,20 +235,40 @@ jobs:
           # author wrote after it lands *outside* the marked region, where it reads as
           # prompt. The tags are fixed strings, so neutralising them is complete: there is
           # no other spelling the model parses as the same delimiter.
+          # perl, not sed: this has to be case-insensitive and whitespace-tolerant, and BSD
+          # sed has no case-insensitive substitute flag, so a sed version would either be a
+          # GNU-only `I` flag or twenty spelled-out character classes. perl ships on every
+          # runner image. `</pr_context >`, `</PR_CONTEXT>` and `< / pr_context foo="1">` all
+          # read as the same delimiter to a model, so matching the shape is the only version
+          # of this that is not walked around by whitespace.
           strip_block_tags() {
-            sed -e 's|<\(/\{0,1\}\)pr_context>|[\1pr_context]|g' \
-                -e 's|<\(/\{0,1\}\)prior_review_comments>|[\1prior_review_comments]|g'
+            perl -pe 's{< \s* /? \s* (?: pr_context | prior_review_comments ) [^>]* >}{[block tag removed]}gix'
           }
+
+          THREADS_FILE="${RUNNER_TEMP}/threads.md"
+          printf '%s\n' "$THREADS" > "$THREADS_FILE"
+          cap_file "$THREADS_FILE" "$THREADS_MAX_BYTES" \
+            "prior review comments truncated at ${THREADS_MAX_BYTES} bytes; read the rest with gh pr view"
 
           DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
           {
             echo "threads<<${DELIMITER}"
-            printf '%s\n' "$THREADS" | strip_block_tags
+            strip_block_tags < "$THREADS_FILE"
             echo "${DELIMITER}"
           } >> $GITHUB_OUTPUT
 
           # Title and body reach the shell through env, never a ${{ }} interpolation: both
           # are attacker-controlled text and would otherwise be spliced into this script.
+          # First in the file on purpose: the byte cap keeps the head, so anything the
+          # reviewer must not miss has to be above the blocks that can grow.
+          if [ -s "$WARN_FILE" ]; then
+            {
+              echo "## Context warnings"
+              cat "$WARN_FILE"
+              echo
+            } >> "$CTX"
+          fi
+
           {
             echo "## Pull request"
             echo "Title: ${PR_TITLE}"
@@ -275,7 +346,10 @@ jobs:
             fi
             SUMMARY=$(grep -E "$LOG_SUMMARY_RE" "$JOB_LOG" | tail -n 20) || SUMMARY=''
             if [ -n "$SUMMARY" ]; then
-              { echo "Summary lines:"; printf '%s\n' "$SUMMARY"; echo; } >> "$CTX"
+              EXCERPT="${RUNNER_TEMP}/job-${JOB_ID}-summary.txt"
+              printf '%s\n' "$SUMMARY" > "$EXCERPT"
+              cap_file "$EXCERPT" "$LOG_MAX_BYTES" "summary truncated"
+              { echo "Summary lines:"; cat "$EXCERPT"; echo; } >> "$CTX"
             fi
             # The *first* error marker: later steps in the same job add their own, and the
             # failing step's is the one with the cause above it.
@@ -291,12 +365,20 @@ jobs:
             if [ -n "$ERR_LINE" ]; then
               START=$((ERR_LINE - LOG_WINDOW + 1))
               if [ "$START" -lt 1 ]; then START=1; fi
+              EXCERPT="${RUNNER_TEMP}/job-${JOB_ID}-window.txt"
+              sed -n "${START},${ERR_LINE}p" "$JOB_LOG" > "$EXCERPT"
+              cap_file "$EXCERPT" "$LOG_MAX_BYTES" \
+                "log excerpt truncated at ${LOG_MAX_BYTES} bytes"
               {
                 echo "Log lines ${START}-${ERR_LINE}, ending at the first error:"
-                sed -n "${START},${ERR_LINE}p" "$JOB_LOG"
+                cat "$EXCERPT"
               } >> "$CTX"
             else
-              { echo "Last ${LOG_WINDOW} log lines:"; tail -n "$LOG_WINDOW" "$JOB_LOG"; } >> "$CTX"
+              EXCERPT="${RUNNER_TEMP}/job-${JOB_ID}-tail.txt"
+              tail -n "$LOG_WINDOW" "$JOB_LOG" > "$EXCERPT"
+              cap_file "$EXCERPT" "$LOG_MAX_BYTES" \
+                "log excerpt truncated at ${LOG_MAX_BYTES} bytes"
+              { echo "Last ${LOG_WINDOW} log lines:"; cat "$EXCERPT"; } >> "$CTX"
             fi
           done
 
@@ -390,10 +472,8 @@ jobs:
           # the file far below this, so hitting it means one of them regressed.
           if [ "$(wc -c < "$CTX" | tr -d " ")" -gt "$CTX_MAX_BYTES" ]; then
             echo "::warning::Review context exceeded ${CTX_MAX_BYTES} bytes and was truncated."
-            head -c "$CTX_MAX_BYTES" "$CTX" > "${CTX}.cut"
-            mv "${CTX}.cut" "$CTX"
-            echo "(context truncated at ${CTX_MAX_BYTES} bytes)" >> "$CTX"
           fi
+          cap_file "$CTX" "$CTX_MAX_BYTES" "context truncated at ${CTX_MAX_BYTES} bytes"
 
           CTX_DELIMITER="PR_CONTEXT_$(openssl rand -hex 16)"
           {
