@@ -29,9 +29,24 @@ environment)" while CI had already run those tests. Runs with no denials average
 seconds against 37 turns and 270 seconds for runs with five or more.
 
 Each block degrades to a sentence saying what is missing rather than to silence, because a reviewer
-handed an empty CI block will state that CI is clean. The step is `continue-on-error`: a failure
+handed an empty CI block will state that CI is clean. Two reads get a stronger treatment: a failed
+`/reviews` or `/pulls/{n}/comments` would otherwise render as `REVIEW CYCLE: 1` and "no prior review
+comments", which are claims rather than gaps, so those failures are disclosed to the reviewer in a
+`## Context warnings` block at the top of the context. The step is `continue-on-error`: a failure
 there once skipped the review step and the notify step with it, leaving the PR with no review and no
 explanation.
+
+Both step outputs are byte-bounded (100 KB of comment threads, 200 KB of context), with per-block
+caps beneath that — 3,000 diff lines, 40 KB per CI log excerpt, 3,000 characters per comment. The
+caps are deliberately far below any plausible runner limit: 400 inline comments rendered 1.1 MB of
+threads before they existed, and the runner accounts for output size in UTF-16, so a byte count here
+is not the number it checks against. Blocks are ordered so that truncation sacrifices the PR
+conversation before the diff or the CI status.
+
+Everything reaching the prompt is attacker-controlled — title, body, diff, CI logs, comments — so the
+block delimiters are neutralised by shape rather than by exact string: `</pr_context >`,
+`</PR_CONTEXT>` and `< / pr_context foo="1">` all read as the same delimiter to a model, and any of
+them would otherwise end the data block early and land the rest where it reads as instructions.
 
 ### Tool usage artifact
 
