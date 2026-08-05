@@ -25,6 +25,7 @@ cd "$(dirname "$0")/.."
 
 failures=0
 WORKFLOW_FILE=.github/workflows/claude-pr-review.yml
+TESTS_FILE=.github/workflows/tests.yml
 
 # The delimiter, assembled rather than written, so this file does not trip its own scan.
 OPEN="\${$(printf '%s' '{')"
@@ -165,6 +166,36 @@ check_permission "statusCheckRollup" checks "the CheckRun half of the CI rollup"
 check_permission "statusCheckRollup" statuses "the StatusContext half of the CI rollup"
 check_permission "/compare/" contents "the since-last-review comparison"
 check_permission "/pulls/" pull-requests "the PR reads"
+
+# The table above forces a new API call in the context step to declare its permission on the
+# review job. That does nothing for the smoke job in tests.yml, which calls the review workflow
+# and has to grant the same set by hand: a caller cannot give a reusable workflow more than it
+# holds, so a permission added on one side and not the other fails the smoke job with Actions'
+# "is requesting 'x: read', but is only allowed 'x: none'" -- loud, but on a file that looks
+# unrelated to the change that caused it. Asserting the two match keeps the claim in tests.yml's
+# comment true by construction instead of by review.
+#
+# Name and value both, so pull-requests: write degrading to read is caught too.
+perm_pairs() {
+  awk '/^    permissions:$/ { p = 1; next }
+       p && /^      [a-z-]+:[[:space:]]/ { print $1, $2 }
+       p && /^    [a-z]/ { exit }' "$1" | sort
+}
+review_perms=$(perm_pairs "$WORKFLOW_FILE")
+smoke_perms=$(perm_pairs "$TESTS_FILE")
+if [ -z "$review_perms" ] || [ -z "$smoke_perms" ]; then
+  echo "FAIL a permissions block came back empty (review: $(printf '%s' "$review_perms" | wc -l)," \
+    "smoke: $(printf '%s' "$smoke_perms" | wc -l)); the parity check proves nothing"
+  failures=$((failures + 1))
+elif [ "$review_perms" != "$smoke_perms" ]; then
+  echo "FAIL the smoke job in $TESTS_FILE does not grant what the review job declares."
+  echo "     A caller cannot grant a reusable workflow more than it holds, so the smoke job"
+  echo "     fails until both sides agree. Difference (< review job, > smoke job):"
+  diff <(printf '%s\n' "$review_perms") <(printf '%s\n' "$smoke_perms") | sed 's/^/       /'
+  failures=$((failures + 1))
+else
+  echo "ok   the smoke job grants exactly what the review job declares"
+fi
 
 # The scan above is a backstop for one class. actionlint checks the schema, the expression
 # grammar, and the shell; run it when it is on PATH. shellcheck findings are excluded because
