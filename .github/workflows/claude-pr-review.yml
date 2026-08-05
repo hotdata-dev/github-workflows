@@ -254,8 +254,32 @@ jobs:
           # runner image. `</pr_context >`, `</PR_CONTEXT>` and `< / pr_context foo="1">` all
           # read as the same delimiter to a model, so matching the shape is the only version
           # of this that is not walked around by whitespace.
-          strip_block_tags() {
-            perl -pe 's{< \s* /? \s* (?: pr_context | prior_review_comments ) [^>]* >}{[block tag removed]}gix'
+          #
+          # Second substitution, same pass, different sink. Actions reads a log line whose
+          # first non-blank characters are `::` or `##[` as a *workflow command* rather than
+          # as text, and the action echoes the assembled prompt into the job log line by
+          # line -- so a marker anywhere in a PR body, a diff hunk, or a prior review comment
+          # becomes a real annotation on the review's own check run. Run 30964274400 carries
+          # two `failure` annotations whose text is prose from a review comment discussing
+          # `##[error]`; the run still concluded success, so what this costs is a red mark on
+          # a green check, not a broken review.
+          #
+          # Which blocks can carry one is decided by whether the text arrives with a line
+          # prefix. The CI excerpt cannot: `/actions/jobs/{id}/logs` prefixes every line with
+          # a timestamp, so a marker inside a fetched log is mid-line and was never a command
+          # (tests/fixtures/job-log-django.txt keeps that shape deliberately). The blocks that
+          # can are the ones quoting text verbatim -- PR title and body, review comments, the
+          # PR conversation, and the diff, where an unchanged context line is rendered with a
+          # single leading space and the runner trims before it parses.
+          #
+          # Prefixing the line is the whole fix -- the parser only looks at the start of one
+          # -- and it keeps the marker visible, which matters when the text the reviewer is
+          # reading is *about* an error line.
+          neutralise_untrusted() {
+            perl -pe '
+              s{< \s* /? \s* (?: pr_context | prior_review_comments ) [^>]* >}{[block tag removed]}gix;
+              s{^ (\s*) (?= :: | \#\# \[ )}{${1}[log marker neutralised] }x;
+            '
           }
 
           THREADS_FILE="${RUNNER_TEMP}/threads.md"
@@ -266,7 +290,7 @@ jobs:
           DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
           {
             echo "threads<<${DELIMITER}"
-            strip_block_tags < "$THREADS_FILE"
+            neutralise_untrusted < "$THREADS_FILE"
             echo "${DELIMITER}"
           } >> $GITHUB_OUTPUT
 
@@ -499,7 +523,7 @@ jobs:
           CTX_DELIMITER="PR_CONTEXT_$(openssl rand -hex 16)"
           {
             echo "pr_context<<${CTX_DELIMITER}"
-            strip_block_tags < "$CTX"
+            neutralise_untrusted < "$CTX"
             echo "${CTX_DELIMITER}"
           } >> $GITHUB_OUTPUT
         env:

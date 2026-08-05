@@ -48,6 +48,15 @@ block delimiters are neutralised by shape rather than by exact string: `</pr_con
 `</PR_CONTEXT>` and `< / pr_context foo="1">` all read as the same delimiter to a model, and any of
 them would otherwise end the data block early and land the rest where it reads as instructions.
 
+The same text gets a second treatment for a different sink. The action echoes the assembled prompt
+into the job log line by line, and GitHub reads a log line starting with `::` or `##[` as a *workflow
+command* — so a marker in a PR body, a review comment, or a diff context line writes an annotation
+onto the review's own check run. One run carried two `failure` annotations whose text was prose from
+a review comment discussing `##[error]`. Such a line is prefixed rather than stripped: the parser
+only looks at the start of a line, and the marker stays legible for a reviewer reading text that is
+*about* an error. The CI excerpt is exempt by accident — the logs endpoint timestamps every line, so
+markers inside a fetched log are mid-line and were never commands.
+
 ### Tool usage artifact
 
 Each run attaches a `claude-tool-usage-pr-<number>` artifact (14-day retention): tool call counts,
