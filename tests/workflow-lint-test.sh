@@ -97,6 +97,30 @@ for wf in "${WORKFLOWS[@]}"; do
   fi
 done
 
+# cancel-in-progress cancels whatever else is in the group, so the group needs a key that is
+# never empty on any event the workflow accepts. It is keyed on the pull request number, and
+# tests.yml calls this workflow on `push: branches: [main]` as well, where there is no pull
+# request and that key expands to nothing -- collapsing every main-push run into one constant
+# group. Two merges landing close together would then cancel each other, and because the
+# cancellation lands on a *called* workflow it takes the caller's whole Tests run with it, so a
+# commit on main silently loses its test signal.
+#
+# Checked as a property of the expression rather than by evaluating it: the PR number must be
+# followed by a `||` fallback, so the group stays unique when there is no pull request.
+group_line=$(grep -n '^  group:' "$WORKFLOW_FILE" | head -1)
+if [ -z "$group_line" ]; then
+  echo "FAIL $WORKFLOW_FILE has no workflow-level concurrency group; this check proves nothing"
+  failures=$((failures + 1))
+elif ! printf '%s\n' "$group_line" | grep -q 'pull_request\.number[[:space:]]*||'; then
+  echo "FAIL the concurrency group keys on the pull request number with no fallback, so on a"
+  echo "     push to main it collapses to a constant and concurrent merges cancel each other's"
+  echo "     Tests run:"
+  printf '%s\n' "$group_line" | sed 's/^/       /'
+  failures=$((failures + 1))
+else
+  echo "ok   the concurrency group stays unique when there is no pull request"
+fi
+
 # Every read the context step makes needs a permission declared on the job, because the job
 # declares `permissions:` explicitly and anything unlisted is `none`. That failure is silent
 # by design -- each block degrades to its "could not read" sentence -- so a missing line here

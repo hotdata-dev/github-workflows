@@ -26,8 +26,15 @@ on:
 # caller's `github` context: both would otherwise compute pr-review-<same number> on the same
 # pull request, and cancel-in-progress would have each cancelling the other. A smoke test that
 # kills real reviews is worse than no smoke test.
+#
+# The run_id fallback is for the other event. tests.yml also calls this on `push: branches:
+# [main]`, where there is no pull request and the number expands to nothing, so without it every
+# main-push run shares one constant group -- and cancel-in-progress on a *called* workflow does
+# not just drop the smoke job, it takes the caller's whole Tests run with it. Two merges close
+# together would leave the earlier commit with no test signal on main. run_id is the caller's,
+# and unique per run.
 concurrency:
-  group: pr-review-${{ inputs.dry_run && 'smoke' || 'live' }}-${{ github.event.pull_request.number }}
+  group: pr-review-${{ inputs.dry_run && 'smoke' || 'live' }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
