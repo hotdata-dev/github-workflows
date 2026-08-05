@@ -37,7 +37,10 @@ there once skipped the review step and the notify step with it, leaving the PR w
 explanation.
 
 Both step outputs are byte-bounded (100 KB of comment threads, 200 KB of context), with per-block
-caps beneath that — 3,000 diff lines, 40 KB per CI log excerpt, 3,000 characters per comment. The
+caps beneath that — 3,000 diff lines, 40 KB per CI log excerpt, 40 KB of PR description, 3,000
+characters per comment. The description's cap is the newest and is measured on sanitised bytes: the
+blocks are appended in order, so an uncapped block ahead of the diff does not merely inflate the
+output, it spends the budget the diff was going to use. The
 caps are deliberately far below any plausible runner limit: 400 inline comments rendered 1.1 MB of
 threads before they existed, and the runner accounts for output size in UTF-16, so a byte count here
 is not the number it checks against. Blocks are ordered so that truncation sacrifices the PR

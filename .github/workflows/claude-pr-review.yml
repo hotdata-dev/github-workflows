@@ -132,6 +132,11 @@ jobs:
           # line has no length limit, so a base64 or JSON dump next to the first error marker
           # would otherwise consume the whole context ahead of the diff.
           LOG_MAX_BYTES=40000
+          # The description's own budget. GitHub allows 65,536 characters, and every one of
+          # them is author-controlled text appended ahead of the diff, so this is the block
+          # that decides whether the diff still fits. 40 KB is ~10x the largest real
+          # description in the corpus and a sixth of the total.
+          BODY_MAX_BYTES=40000
           CTX="${RUNNER_TEMP}/pr-context.md"
           : > "$CTX"
 
@@ -330,6 +335,29 @@ jobs:
             } >> "$CTX"
           fi
 
+          # The description gets its own cap, on *sanitised* bytes, because it was the one
+          # untrusted block with no bound of its own and the blocks are appended in order.
+          # Everything above measures what it appends -- the log excerpts are line-bounded, the
+          # diffs are line-capped -- so an uncapped block here does not merely inflate the
+          # output, it spends the budget that `## Full diff` below was going to use. 65,536
+          # characters of `::` lines is ~610 KB after neutralisation against a 200 KB total, so
+          # `head -c` would cut a third of the way into the description and every block after
+          # it, the diff included, would simply be absent.
+          #
+          # Neutralising here as well as in the whole-file pass is deliberate and safe: both
+          # substitutions are idempotent (`## [error]` no longer matches `##\[`, and a prefixed
+          # line no longer starts with `::`), so the second pass is a no-op over this text. The
+          # whole-file pass stays because it is what guarantees nothing was missed; this one
+          # exists so the cap measures the bytes that actually leave.
+          BODY_FILE="${RUNNER_TEMP}/pr-body.md"
+          if [ -n "${PR_BODY}" ]; then
+            printf '%s\n' "${PR_BODY}" | neutralise_untrusted > "$BODY_FILE"
+          else
+            echo "(no description)" > "$BODY_FILE"
+          fi
+          cap_file "$BODY_FILE" "$BODY_MAX_BYTES" \
+            "description truncated at ${BODY_MAX_BYTES} bytes; read the rest with gh pr view"
+
           {
             echo "## Pull request"
             echo "Title: ${PR_TITLE}"
@@ -337,7 +365,7 @@ jobs:
             echo "Head SHA: ${HEAD_SHA}"
             echo
             echo "### Description"
-            if [ -n "${PR_BODY}" ]; then printf '%s\n' "${PR_BODY}"; else echo "(no description)"; fi
+            cat "$BODY_FILE"
           } >> "$CTX"
 
           # Each block: read, project, and fall back to a sentence saying what is missing.

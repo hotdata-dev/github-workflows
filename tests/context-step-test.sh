@@ -207,6 +207,15 @@ STUB
   chmod +x "$WORK/bin/gh"
 }
 
+# The default body, in a single-quoted variable rather than inline in the `${PR_BODY-...}`
+# below. It has to contain an Actions expression and a command substitution, because two
+# assertions exist to prove neither is evaluated -- and inline, its `}}` closed the parameter
+# expansion early. The default was silently delivered as a fragment, which made the expression
+# half of those assertions vacuous, and left `PR_BODY=''` non-empty (the text after the `}}`
+# was concatenated literally), so the empty-description branch could not be reached at all.
+# Single quotes here mean bash never looks inside it.
+DEFAULT_PR_BODY='Adds a watermark. `$(touch /tmp/pwned)` and ${{ github.token }} are literal text here.'
+
 # run_step <description> -- run the extracted script in a clean temp dir, echo its exit code
 run_step() {
   # ${WORK:?} so an unset WORK cannot turn this into `rm -rf /bin`.
@@ -233,7 +242,7 @@ run_step() {
     HEAD_SHA="${HEAD_SHA:-1d01475432236aa4fbca722aaaa2687c2b2e4947}" \
     BASE_REF=main \
     PR_TITLE="${PR_TITLE:-feat(filesystem): continuous sync}" \
-    PR_BODY="${PR_BODY:-Adds a watermark. \`\$(touch /tmp/pwned)\` and \${{ github.token }} are literal text here.}" \
+    PR_BODY="${PR_BODY-$DEFAULT_PR_BODY}" \
     bash --noprofile --norc -eo pipefail "$WORK/step.sh" > "$WORK/step.out" 2>&1
   STEP_STATUS=$?
   set -e
@@ -310,6 +319,11 @@ expect_context '^\+incremental change$' "since-last-review diff carries its body
 # this is the assertion that catches it -- the body here is a command substitution and a
 # ${{ }} expression, and both must survive as characters.
 expect_context '\$\(touch /tmp/pwned\)' "PR body interpolates as literal text, not shell"
+# The whole default, not a prefix of it. This is the assertion that would have caught the
+# `}}` truncation in run_step's default: the Actions expression sits after the point where the
+# parameter expansion used to end, so its arrival proves the body reached the step intact.
+expect_context 'are literal text here\.$' "the whole PR body reaches the context, not a prefix"
+expect_context 'github\.token' "an Actions expression in the PR body survives as text"
 expect "$([ -e /tmp/pwned ] && echo leaked || echo safe)" "safe" \
   "command substitution in the PR body did not execute"
 
@@ -659,6 +673,32 @@ ctx_colon_bytes=$(wc -c < "$CTX_FILE" | tr -d ' ')
 expect "$(awk -v n="$ctx_colon_bytes" 'BEGIN { print (n < 250000) ? "bounded" : "unbounded" }')" \
   "bounded" "the sanitiser cannot grow the context past its cap (was $ctx_colon_bytes bytes)"
 expect_no_markers "$CTX_FILE" "every :: line in an amplifying PR body is still neutralised"
+# Boundedness is not enough, and the three sibling budget tests above say why: each also
+# asserts the diff survived. Moving the substitutions ahead of the final cap made that cap the
+# only byte authority, so an amplifying block that is appended *before* the diff no longer
+# merely inflates the output -- it spends the budget the diff was going to use.
+expect_context '^## Full diff' "the diff block survives an amplifying PR body"
+expect_context 'description truncated at' "the description says it was cut rather than just ending"
+expect_context '^## CI checks' "the CI block survives an amplifying PR body"
+
+# And the ordinary case the cap must not touch: a short description arrives whole.
+PR_BODY='Adds a watermark. Nothing here needs truncating.' run_step > /dev/null
+expect_context 'Nothing here needs truncating' "a normal description is not truncated"
+if context_has 'description truncated at'; then
+  echo "FAIL a normal description was reported as truncated"
+  failures=$((failures + 1))
+else
+  echo "ok   a normal description carries no truncation notice"
+fi
+
+# An empty description has to read as empty rather than as a missing block, and it now travels
+# through the same file as a full one -- an untested branch of the code this commit touched.
+# Note `${PR_BODY-...}` in run_step rather than `${PR_BODY:-...}`: with the colon an explicitly
+# empty body collapses into the default, so this case could not be expressed at all and the
+# first version of this assertion failed against correct code.
+PR_BODY='' run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a PR with no description"
+expect_context '\(no description\)' "an empty description says so"
 
 # Ordering only means something if an *earlier* block can exhaust the budget. LOG_WINDOW
 # counts lines, and a CI log line has no length limit -- one base64 or JSON dump near the
