@@ -36,8 +36,8 @@ extract_step() {
   ' "$WORKFLOW"
 }
 
-# Assembled rather than written literally: this file must not contain the delimiter either,
-# or the grep below finds itself when someone greps the test suite for it.
+# One definition, shared by the two sed patterns and the grep below, so the thing being
+# substituted and the thing being forbidden cannot drift apart.
 EXPR_OPEN="\${$(printf '%s' '{')"
 extract_step \
   | sed -e "s/${EXPR_OPEN} github.event.pull_request.number }}/\"\$STUB_PR\"/g" \

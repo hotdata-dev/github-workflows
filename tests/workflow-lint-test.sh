@@ -30,7 +30,16 @@ WORKFLOW_FILE=.github/workflows/claude-pr-review.yml
 OPEN="\${$(printf '%s' '{')"
 CLOSE="$(printf '%s' '}')}"
 
-for wf in .github/workflows/*.yml; do
+# Actions loads .yaml as well as .yml, and an unscanned workflow would go unmentioned
+# rather than reported.
+shopt -s nullglob
+WORKFLOWS=(.github/workflows/*.yml .github/workflows/*.yaml)
+if [ "${#WORKFLOWS[@]}" -eq 0 ]; then
+  echo "FAIL no workflow files found; the scan proves nothing"
+  exit 1
+fi
+
+for wf in "${WORKFLOWS[@]}"; do
   # The distinction that caused the outage, and the one the scan has to make: a delimiter in
   # a *YAML* comment is stripped by the YAML parser and never reaches Actions, while the same
   # characters inside a block scalar are part of the string value and are parsed. So block
@@ -46,11 +55,14 @@ for wf in .github/workflows/*.yml; do
         if (j == 0) { print FILENAME ":" FNR ": unterminated expression (" where ")"; return }
         expr = substr(rest, 1, j - 1)
         gsub(/^[ \t]+|[ \t]+$/, "", expr)
+        # Empty and unterminated only. A character class over what an expression may contain
+        # rejects valid ones -- hashFiles and format calls use slashes, braces and percent
+        # signs that no reasonable class covers -- and a heuristic that hard-fails CI on
+        # correct input gets deleted rather than fixed. actionlint checks the grammar
+        # properly, and now actually runs in CI.
         if (expr == "")
           print FILENAME ":" FNR ": empty expression in " where \
             " -- Actions rejects the whole workflow"
-        else if (expr !~ /^[A-Za-z_0-9.,()!<>=&|*'\''"\[\] \t-]+$/)
-          print FILENAME ":" FNR ": odd expression in " where ": " expr
         line = substr(rest, j + length(shut))
       }
     }
@@ -100,6 +112,15 @@ step_script=$(awk '
   in_run && /^        [a-z]/ { exit }
   in_run { print }
 ' "$WORKFLOW_FILE")
+# Fail loudly if the extraction drifted. check_permission returns early when the pattern is
+# absent from the script, so an empty step_script silently turns all six checks into no-ops --
+# in the one file whose purpose is catching a permission that is silently missing. (declared
+# fails safe: empty means every check reports FAIL.)
+if [ "$(printf '%s\n' "$step_script" | wc -l)" -lt 100 ]; then
+  echo "FAIL the context-step extraction no longer matches $WORKFLOW_FILE;" \
+    "the permission table proves nothing"
+  failures=$((failures + 1))
+fi
 declared=$(awk '/^    permissions:$/ { p = 1; next } p && /^      [a-z-]+:/ { print $1 } p && /^    [a-z]/ { exit }' \
   "$WORKFLOW_FILE" | tr -d ':')
 
@@ -125,7 +146,7 @@ check_permission "/pulls/" pull-requests "the PR reads"
 # grammar, and the shell; run it when it is on PATH. shellcheck findings are excluded because
 # the run blocks here intentionally use unquoted word splitting for job ids.
 if command -v actionlint >/dev/null 2>&1; then
-  if out=$(actionlint .github/workflows/*.yml 2>&1); then
+  if out=$(actionlint "${WORKFLOWS[@]}" 2>&1); then
     echo "ok   actionlint reports no findings"
   else
     remaining=$(printf '%s\n' "$out" | grep -v 'shellcheck reported' || true)

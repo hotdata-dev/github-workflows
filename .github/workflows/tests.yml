@@ -16,6 +16,26 @@ jobs:
         with:
           fetch-depth: 1
 
+      # actionlint is the check that would have caught the outage, so it has to actually run
+      # here: it is not on the runner image, and without this step the lint test reports
+      # "skip actionlint not installed" forever and only its own awk backstop runs.
+      #
+      # Downloaded and checksummed rather than pulled in as a third-party action, because
+      # this repository's workflows are what gate every merge in the org -- an unpinned
+      # `uses:` here would be a supply-chain hole in the one place it hurts most.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf actionlint.tar.gz actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          rm -f actionlint actionlint.tar.gz
+          actionlint --version
+
       # First, because it is the check whose absence took the org down: a workflow that
       # Actions cannot parse never starts, so the required check never reports and every pull
       # request in the org blocks. Nothing else in this suite can see that -- the file is
