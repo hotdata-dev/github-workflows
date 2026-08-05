@@ -6,61 +6,56 @@
 # check, and until it was made continue-on-error a non-zero exit here skipped the review
 # *and* the notify step, leaving the PR with no review and no explanation.
 #
-# `bash -e -o pipefail` is what the runner uses, and it is unforgiving of the shapes this
-# script is full of: `grep | tail` finding nothing, `$(( ))` on an empty variable, a `[ ]`
-# test as the last command of a branch. Each of those aborts the step. So the script is run
-# here exactly as the runner runs it, with the failure modes injected: an endpoint that
-# 404s, a log with no error marker, a diff past the truncation cap.
+# -e and pipefail are unforgiving of the shapes this script is full of: `grep | tail` finding
+# nothing, `$(( ))` on an empty variable, a `[ ]` test as the last command of a branch. Each of
+# those aborts the step. So the script is invoked the way the workflow invokes it -- plain
+# `bash <file>`, no flags from outside, so the `set -eo pipefail` inside the script is itself
+# under test -- with the failure modes injected: an endpoint that 404s, a log with no error
+# marker, a diff past the truncation cap.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 WORKFLOW=.github/workflows/claude-pr-review.yml
+CONTEXT_SCRIPT=scripts/gather-review-context.sh
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 failures=0
 
-# The step script, extracted from the workflow rather than copied: everything indented
-# inside its `run: |` block, dedented, with the two ${{ }} expressions replaced by the
-# variables the stub reads. Anything else interpolated into this script would be missed
-# here, which is itself worth knowing -- ${{ }} in a run block is how shell injection gets
-# in, and the env: block is where PR title and body are deliberately kept.
-extract_step() {
-  awk '
-    /^      - name: Gather review context$/ { in_step = 1 }
-    in_step && /^        run: \|$/ { in_run = 1; next }
-    in_run && /^        [a-z]/ { exit }
-    in_run { sub(/^          /, ""); print }
-  ' "$WORKFLOW"
-}
-
-# One definition, shared by the two sed patterns and the grep below, so the thing being
-# substituted and the thing being forbidden cannot drift apart.
-EXPR_OPEN="\${$(printf '%s' '{')"
-extract_step \
-  | sed -e "s/${EXPR_OPEN} github.event.pull_request.number }}/\"\$STUB_PR\"/g" \
-        -e "s/${EXPR_OPEN} github.repository }}/\"\$STUB_REPO\"/g" \
-  > "$WORK/step.sh"
-
-if [ "$(wc -l < "$WORK/step.sh")" -lt 100 ]; then
-  echo "FAIL: extracted step script is only $(wc -l < "$WORK/step.sh") lines; the awk" \
-    "extraction no longer matches the workflow" >&2
+# The script the workflow runs, run directly. It used to be scraped out of a `run: |` block and
+# rewritten by sed, because that is where it lived; now it is a file, so there is no extraction
+# to drift and no copy to diverge from the shipped thing.
+if [ ! -f "$CONTEXT_SCRIPT" ]; then
+  echo "FAIL: $CONTEXT_SCRIPT is missing" >&2
   exit 1
 fi
-# No Actions expression delimiter may survive anywhere in the extracted script -- not in
-# code, and not in a comment either. The comment exemption this check used to carry is what
-# shipped a broken workflow to every repo in the org: a shell comment reading "never a
-# ${OPEN} interpolation" parses as an *empty expression*, which Actions rejects outright, so
-# the workflow never started, no required check ever reported, and every PR in the org sat
-# behind "Please close and reopen the PR to trigger this workflow". bash does not care what
-# is in a comment; the Actions expression parser does.
-if grep -q "$EXPR_OPEN" "$WORK/step.sh"; then
-  echo "FAIL: an Actions expression delimiter survives in the extracted step script." >&2
-  echo "      Either this test needs to substitute it, or -- if it is inside a comment --" >&2
-  echo "      the comment has to stop spelling the delimiter out." >&2
-  grep -n "$EXPR_OPEN" "$WORK/step.sh" >&2
+if [ "$(wc -l < "$CONTEXT_SCRIPT")" -lt 100 ]; then
+  echo "FAIL: $CONTEXT_SCRIPT is only $(wc -l < "$CONTEXT_SCRIPT") lines" >&2
+  exit 1
+fi
+
+# The workflow must actually run it. A green suite over an orphaned script is the failure this
+# guards against: the file would be exercised here and never reached in production.
+if ! grep -qF "$CONTEXT_SCRIPT" "$WORKFLOW"; then
+  echo "FAIL: $WORKFLOW does not reference $CONTEXT_SCRIPT" >&2
+  exit 1
+fi
+
+# No Actions expression delimiter may appear in the script. Out here it is inert -- Actions never
+# parses this file -- but an interpolation is the one way pull-request text could reach the script
+# as code, and the delimiter appearing at all would mean someone had put the script back under the
+# template parser, where an empty pair is an outage. That is what shipped a broken workflow to
+# every repo in the org: a shell comment reading "never a ${OPEN} interpolation" parses as an
+# *empty expression*, which Actions rejects outright, so the workflow never started, no required
+# check ever reported, and every PR in the org sat behind "Please close and reopen the PR to
+# trigger this workflow".
+EXPR_OPEN="\${$(printf '%s' '{')"
+if grep -q "$EXPR_OPEN" "$CONTEXT_SCRIPT"; then
+  echo "FAIL: an Actions expression delimiter appears in $CONTEXT_SCRIPT." >&2
+  echo "      Values reach this script through the step's env:, never by interpolation." >&2
+  grep -n "$EXPR_OPEN" "$CONTEXT_SCRIPT" >&2
   exit 1
 fi
 
@@ -201,8 +196,8 @@ run_step() {
     RUNNER_TEMP="$WORK/rt" \
     GITHUB_OUTPUT="$WORK/out.txt" \
     STUB_FIXTURES="$PWD/tests/fixtures" \
-    STUB_PR=172 \
-    STUB_REPO=hotdata-dev/dlthubworker \
+    PR_NUMBER=172 \
+    REPO=hotdata-dev/dlthubworker \
     STUB_JOB_LOG="${STUB_JOB_LOG:-job-log-django.txt}" \
     GH_VERSION="${GH_VERSION:-2.96}" \
     COMPARE_STATUS="${COMPARE_STATUS:-ahead}" \
@@ -214,7 +209,7 @@ run_step() {
     BASE_REF=main \
     PR_TITLE="${PR_TITLE:-feat(filesystem): continuous sync}" \
     PR_BODY="${PR_BODY:-Adds a watermark. \`\$(touch /tmp/pwned)\` and \${{ github.token }} are literal text here.}" \
-    bash --noprofile --norc -eo pipefail "$WORK/step.sh" > "$WORK/step.out" 2>&1
+    bash "$CONTEXT_SCRIPT" > "$WORK/step.out" 2>&1
   STEP_STATUS=$?
   set -e
   awk '/^pr_context<</ { d = substr($0, 13); next } d && $0 == d { exit } d' \

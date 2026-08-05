@@ -26,6 +26,7 @@ cd "$(dirname "$0")/.."
 failures=0
 WORKFLOW_FILE=.github/workflows/claude-pr-review.yml
 TESTS_FILE=.github/workflows/tests.yml
+CONTEXT_SCRIPT=scripts/gather-review-context.sh
 
 # The delimiter, assembled rather than written, so this file does not trip its own scan.
 OPEN="\${$(printf '%s' '{')"
@@ -131,19 +132,13 @@ fi
 #
 # The table is endpoint-shape to permission. It is deliberately coarse; the point is that
 # adding a new API call to the step forces a decision about its permission.
-step_script=$(awk '
-  /^      - name: Gather review context$/ { in_step = 1 }
-  in_step && /^        run: \|$/ { in_run = 1; next }
-  in_run && /^        [a-z]/ { exit }
-  in_run { print }
-' "$WORKFLOW_FILE")
-# Fail loudly if the extraction drifted. check_permission returns early when the pattern is
-# absent from the script, so an empty step_script silently turns all six checks into no-ops --
-# in the one file whose purpose is catching a permission that is silently missing. (declared
-# fails safe: empty means every check reports FAIL.)
+step_script=$(cat "$CONTEXT_SCRIPT" 2>/dev/null || true)
+# Fail loudly if the script went missing or shrank to nothing. check_permission returns early
+# when the pattern is absent from the script, so an empty step_script silently turns all six
+# checks into no-ops -- in the one file whose purpose is catching a permission that is silently
+# missing. (declared fails safe: empty means every check reports FAIL.)
 if [ "$(printf '%s\n' "$step_script" | wc -l)" -lt 100 ]; then
-  echo "FAIL the context-step extraction no longer matches $WORKFLOW_FILE;" \
-    "the permission table proves nothing"
+  echo "FAIL $CONTEXT_SCRIPT is missing or too short; the permission table proves nothing"
   failures=$((failures + 1))
 fi
 declared=$(awk '/^    permissions:$/ { p = 1; next } p && /^      [a-z-]+:/ { print $1 } p && /^    [a-z]/ { exit }' \

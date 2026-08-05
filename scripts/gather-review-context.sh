@@ -1,0 +1,417 @@
+#!/usr/bin/env bash
+#
+# Gathers the pull request context that the Claude review prompt reads. The "Gather review
+# context" step of .github/workflows/claude-pr-review.yml runs this file, which it checks out of
+# hotdata-dev/github-workflows alongside the prompt document.
+#
+# It is a file rather than a `run:` block because Actions parses a `run:` block as one template
+# expression and refuses any over 21,000 characters. This script is 20 KB. Inline it left roughly
+# 450 characters of headroom -- about six comment lines -- and the change that crossed the line
+# stopped every review in the org with "Invalid workflow file". The same parse is what makes an
+# empty expression delimiter anywhere in an inline block, a shell comment included, an outage;
+# that was the one before it. Neither hazard exists out here. Actions never parses this file,
+# bash does, and bash has no opinion about what is in a comment.
+#
+# The step passes PR_NUMBER, REPO, GH_TOKEN, HEAD_SHA, BASE_REF, PR_TITLE and PR_BODY in through
+# `env:`. Nothing is interpolated into this script, so no pull-request-controlled text can arrive
+# here as code.
+#
+# -e and pipefail, which is what the step's `shell: bash` used to supply: this is mostly
+# `gh ... | jq` pipelines, and gh writes its error body to stdout, so without pipefail a failed
+# fetch feeds its own error text to jq and the block renders whatever jq makes of it instead of
+# the guarded fallback sentence. Not -u -- the script was written without one and does not
+# assume it.
+set -eo pipefail
+
+: "${PR_NUMBER:?the calling step must set PR_NUMBER}"
+: "${REPO:?the calling step must set REPO}"
+
+# Caps. The median PR reviewed across the org is 161 changed lines and the largest
+# in a week was 3,448, so 3,000 patch lines covers the corpus; the cap exists so
+# one generated-file PR cannot blow up the prompt.
+DIFF_MAX=3000
+SINCE_MAX=2000
+LOG_WINDOW=120
+# Byte budgets, split across the step's two outputs rather than applied to one of
+# them. threads is its own output written before the context file, so a cap that
+# only measured the context bounded nothing: 400 inline comments rendered 1.1 MB of
+# threads on their own. The total here is deliberately far below any plausible
+# runner limit -- the largest PR reviewed across the org in a week rendered about
+# 150 KB -- because the runner accounts for output size in UTF-16, so a byte count
+# here is not the number it checks against.
+THREADS_MAX_BYTES=100000
+CTX_MAX_BYTES=200000
+# One job log can be mostly a single line: LOG_WINDOW counts lines and a CI log
+# line has no length limit, so a base64 or JSON dump next to the first error marker
+# would otherwise consume the whole context ahead of the diff.
+LOG_MAX_BYTES=40000
+CTX="${RUNNER_TEMP}/pr-context.md"
+: > "$CTX"
+
+# gh refuses a raw-text body containing ANSI colour unless told to allow escape
+# sequences, and a diff or a job log earns an escape byte from any file holding
+# terminal output -- this repository's own job-log fixtures do. That refusal and
+# its --allow-escape-sequences opt-out arrived together in gh 2.97.0 as a security
+# fix; ubuntu-latest ships 2.96.0, where the flag is an unknown-flag error and the
+# refusal does not exist either. So every raw fetch tries the flag and falls back
+# to the bare call: on 2.96 the first attempt fails and the second succeeds, on
+# 2.97+ the first succeeds. Pinning either form breaks on the other, and the
+# runner image updates weekly.
+# head -c against a *file*, never a pipe: `sed ... | head -c` closes the pipe early
+# and SIGPIPE takes the producer down under pipefail, which is the shape that has
+# already cost this step its error window once.
+cap_file() {
+  if [ "$(wc -c < "$1" | tr -d " ")" -gt "$2" ]; then
+    head -c "$2" "$1" > "$1.cut"
+    mv "$1.cut" "$1"
+    echo "($3)" >> "$1"
+  fi
+}
+
+fetch_raw() {
+  RAW_OUT=$1
+  shift
+  gh "$@" --allow-escape-sequences > "$RAW_OUT" 2>/dev/null && return 0
+  gh "$@" > "$RAW_OUT" 2>/dev/null
+}
+
+# Count distinct commits already reviewed, never review state: the org ruleset
+# sets dismiss_stale_reviews_on_push, so a push flips a prior APPROVED to
+# DISMISSED and a state filter stops matching it. Inline comments each create
+# their own COMMENTED review sharing the round's commit_id, so unique commit_id
+# == round count, +/-1 when a push lands mid-round and splits it across two SHAs.
+# Coupled to the reviewer's login: if that ever changes the count silently drops
+# to 0 and every round looks like the first, hence the warning below.
+CYCLE_JQ='[.[][] | select(.user.login == "claude[bot]") | .commit_id] | unique | length'
+# Only consulted when CYCLE is 0; see the warning below. Kept in its own variable
+# so tests/review-cycle-test.sh can assert it against the fixtures.
+DRIFT_JQ='any(.[][]; .user.type == "Bot")'
+# Never fail the review over the cycle number; degrade to 1, but say so. gh
+# writes its error body to stdout, so an unguarded pipe into jq aborts the step
+# under `bash -e` and skips the failure-notification step below.
+# CTX_WARNINGS collects the degradations the *model* has to know about, as opposed
+# to the ones only an operator cares about. The distinction is whether the fallback
+# is blank or is an assertion: "Could not read the diff." is visibly missing data,
+# but "REVIEW CYCLE: 1" and "No prior review comments." are claims, and a failed
+# read makes them false ones.
+WARN_FILE="${RUNNER_TEMP}/ctx-warnings.md"
+: > "$WARN_FILE"
+if ! REVIEWS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate); then
+  echo "::warning::Could not read prior reviews; treating this as review cycle 1."
+  {
+    echo "- The prior reviews could not be read, so the REVIEW CYCLE number in this"
+    echo "  prompt may be wrong: it defaults to 1. If this is not really your first"
+    echo "  review, treat the cycle ladder as unknown, and do not take the cycle"
+    echo "  number as evidence that nothing was raised before."
+  } >> "$WARN_FILE"
+  REVIEWS=''
+fi
+CYCLE=$(printf '%s' "$REVIEWS" | jq -s "$CYCLE_JQ" 2>/dev/null) || CYCLE=''
+if [ -z "$CYCLE" ]; then
+  echo "::warning::Could not parse prior reviews; treating this as review cycle 1."
+  CYCLE=0
+elif [ "$CYCLE" -eq 0 ] && printf '%s' "$REVIEWS" \
+  | jq -e -s "$DRIFT_JQ" >/dev/null 2>&1; then
+  # claude[bot] is the only bot that submits reviews across the org (598 of 598
+  # sampled), so bot reviews that the login filter did not count mean the
+  # reviewer's identity moved and the counter has silently pinned at 1.
+  echo "::warning::Bot reviews exist but none matched the reviewer login; the review cycle counter is stale."
+fi
+echo "review_cycle=$((CYCLE + 1))" >> $GITHUB_OUTPUT
+
+# Same guard as the counter above: unguarded `gh api | jq` aborts the step, and a
+# failure here *skips* the review step, so the notify step's failure check never
+# fires and the PR gets no review and no explanation.
+COMMENTS_OK=1
+if ! COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --paginate); then
+  COMMENTS_OK=0
+  echo "::warning::Could not read prior review comments; reviewing without them."
+  {
+    echo "- The prior inline review comments could not be read. That block is empty"
+    echo "  because the fetch failed, not because there were none. Do not conclude"
+    echo "  that no feedback was given; read the threads with gh pr view before"
+    echo "  re-raising anything."
+  } >> "$WARN_FILE"
+  COMMENTS=''
+fi
+# "No prior review comments." is only true when the fetch worked and returned
+# none. Saying it after a failed fetch is the same false claim as an empty CI block
+# reading as a green one, and it is the claim the cycle ladder acts on.
+if [ "$COMMENTS_OK" -eq 0 ]; then
+  THREADS='Unavailable: the prior inline review comments could not be read. This block is empty because the fetch failed, not because there were none.'
+else
+THREADS=$(printf '%s' "$COMMENTS" | jq -s -r '
+  (add // []) | sort_by(.created_at) |
+  if length == 0 then "No prior review comments."
+  else .[] |
+    "---",
+    "Author: \(.user.login)",
+    "File: \(.path)",
+    (if .line then "Line: \(.line)" else empty end),
+    (if .in_reply_to_id then "Reply to #\(.in_reply_to_id)" else "Thread #\(.id)" end),
+    "",
+    ((.body // "")[0:3000])
+  end
+') || THREADS='Unavailable: the prior inline review comments could not be parsed.'
+fi
+
+# The prompt wraps both blocks below in <prior_review_comments> and <pr_context>
+# and tells the reviewer to treat their contents as data. A PR body, a diff hunk,
+# or a CI log containing the closing tag ends the block early, and everything the
+# author wrote after it lands *outside* the marked region, where it reads as
+# prompt. The tags are fixed strings, so neutralising them is complete: there is
+# no other spelling the model parses as the same delimiter.
+# perl, not sed: this has to be case-insensitive and whitespace-tolerant, and BSD
+# sed has no case-insensitive substitute flag, so a sed version would either be a
+# GNU-only `I` flag or twenty spelled-out character classes. perl ships on every
+# runner image. `</pr_context >`, `</PR_CONTEXT>` and `< / pr_context foo="1">` all
+# read as the same delimiter to a model, so matching the shape is the only version
+# of this that is not walked around by whitespace.
+strip_block_tags() {
+  perl -pe 's{< \s* /? \s* (?: pr_context | prior_review_comments ) [^>]* >}{[block tag removed]}gix'
+}
+
+THREADS_FILE="${RUNNER_TEMP}/threads.md"
+printf '%s\n' "$THREADS" > "$THREADS_FILE"
+cap_file "$THREADS_FILE" "$THREADS_MAX_BYTES" \
+  "prior review comments truncated at ${THREADS_MAX_BYTES} bytes; read the rest with gh pr view"
+
+DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
+{
+  echo "threads<<${DELIMITER}"
+  strip_block_tags < "$THREADS_FILE"
+  echo "${DELIMITER}"
+} >> $GITHUB_OUTPUT
+
+# Title and body reach the shell through env, never an Actions expression
+# interpolation: both are attacker-controlled text and would otherwise be spliced
+# into this script.
+#
+# That expression syntax cannot be written out inside this run block, not even in a
+# comment. Actions parses those delimiters in the block's *string value*, comments
+# included, and an empty pair is a syntax error that makes the whole workflow
+# unparseable -- no jobs, no required check, every PR in the org blocked behind
+# "Please close and reopen the PR to trigger this workflow". A YAML comment outside
+# a block scalar is safe, because the YAML parser strips it before Actions looks.
+# First in the file on purpose: the byte cap keeps the head, so anything the
+# reviewer must not miss has to be above the blocks that can grow.
+if [ -s "$WARN_FILE" ]; then
+  {
+    echo "## Context warnings"
+    cat "$WARN_FILE"
+    echo
+  } >> "$CTX"
+fi
+
+{
+  echo "## Pull request"
+  echo "Title: ${PR_TITLE}"
+  echo "Base branch: ${BASE_REF}"
+  echo "Head SHA: ${HEAD_SHA}"
+  echo
+  echo "### Description"
+  if [ -n "${PR_BODY}" ]; then printf '%s\n' "${PR_BODY}"; else echo "(no description)"; fi
+} >> "$CTX"
+
+# Each block: read, project, and fall back to a sentence saying what is missing.
+# A missing block must read as missing, never as "there are no commits".
+COMMITS_JQ='[.[][]] | if length == 0 then "No commits reported." else map("\(.sha[0:8]) \(.commit.message | split("\n")[0])") | join("\n") end'
+if COMMITS_JSON=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate); then
+  COMMITS=$(printf '%s' "$COMMITS_JSON" | jq -s -r "$COMMITS_JQ" 2>/dev/null) \
+    || COMMITS="Could not parse commits."
+else
+  echo "::warning::Could not read commits."
+  COMMITS="Could not read commits."
+fi
+{ echo; echo "## Commits"; printf '%s\n' "$COMMITS"; } >> "$CTX"
+
+# status carries added/modified/removed/renamed, which the raw patch does not spell
+# out for renames, and the per-file counts let the reviewer budget its reading.
+# Every field defaulted: a payload missing .additions would otherwise render
+# "+null", and the reviewer quotes these numbers back in review comments.
+FILES_JQ='[.[][]] | if length == 0 then "No changed files reported." else "\(length) files, +\([.[].additions // 0] | add) -\([.[].deletions // 0] | add)", (.[] | "\(.status // "unknown") +\(.additions // 0)/-\(.deletions // 0) \(.filename // "(unnamed file)")") end'
+if FILES_JSON=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" --paginate); then
+  FILES=$(printf '%s' "$FILES_JSON" | jq -s -r "$FILES_JQ" 2>/dev/null) \
+    || FILES="Could not parse changed files."
+else
+  echo "::warning::Could not read changed files."
+  FILES="Could not read changed files."
+fi
+{ echo; echo "## Changed files"; printf '%s\n' "$FILES"; } >> "$CTX"
+
+# The reviewer cannot run tests -- no dependencies are installed and the allowlist
+# would refuse anyway -- but CI already ran them. Whether they passed is the one
+# fact it was asserting without evidence.
+CHECKS_JQ='(.statusCheckRollup // []) | if length == 0 then "No checks reported." else map(if .__typename == "CheckRun" then "\(.conclusion // .status // "UNKNOWN") \(.workflowName // "") / \(.name // "(unnamed check)")" else "\(.state // "UNKNOWN") \(.context // "status")" end) | sort | join("\n") end'
+# Actions check runs carry the job id in detailsUrl; scan rather than capture so a
+# non-Actions check with no job id drops out instead of erroring.
+FAILING_JOBS_JQ='[(.statusCheckRollup // [])[] | select(.__typename == "CheckRun") | select((.conclusion // "") | test("FAILURE|TIMED_OUT|ACTION_REQUIRED")) | (.detailsUrl // "") | [scan("/job/([0-9]+)")] | flatten | .[0] // empty] | unique | .[0:3] | join(" ")'
+if ROLLUP=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json statusCheckRollup); then
+  CHECKS=$(printf '%s' "$ROLLUP" | jq -r "$CHECKS_JQ" 2>/dev/null) \
+    || CHECKS="Could not parse checks."
+  JOB_IDS=$(printf '%s' "$ROLLUP" | jq -r "$FAILING_JOBS_JQ" 2>/dev/null) || JOB_IDS=''
+else
+  echo "::warning::Could not read check status."
+  CHECKS="Could not read check status."
+  JOB_IDS=''
+fi
+{
+  echo
+  echo "## CI checks as of $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "This workflow runs on the same push as the rest of CI, so checks are often"
+  echo "still queued or in progress here. A check that is not reported as passing"
+  echo "has not passed yet -- it has not necessarily failed."
+  echo
+  printf '%s\n' "$CHECKS"
+} >> "$CTX"
+# Two windows, not a tail. Across five real failed job logs the informative text
+# sat immediately above the first ##[error] in four of them (a rustfmt diff, an
+# npm parity error, a docker push failure, a build error body). In the fifth --
+# a Django suite whose later steps kept running -- "FAILED (failures=1)" was 670
+# lines above ##[error] and a tail returned docker cleanup, so the summary lines
+# get collected separately from wherever they landed.
+LOG_SUMMARY_RE='FAILED \(|FAIL: |ERROR: |test result: FAILED|panicked at|Tests:.*failed|Ran [0-9]+ tests?'
+for JOB_ID in $JOB_IDS; do
+  JOB_LOG="${RUNNER_TEMP}/job-${JOB_ID}.log"
+  { echo; echo "### Failing job ${JOB_ID}"; } >> "$CTX"
+  if ! fetch_raw "$JOB_LOG" api "repos/${REPO}/actions/jobs/${JOB_ID}/logs"; then
+    echo "(log unavailable)" >> "$CTX"
+    continue
+  fi
+  SUMMARY=$(grep -E "$LOG_SUMMARY_RE" "$JOB_LOG" | tail -n 20) || SUMMARY=''
+  if [ -n "$SUMMARY" ]; then
+    EXCERPT="${RUNNER_TEMP}/job-${JOB_ID}-summary.txt"
+    printf '%s\n' "$SUMMARY" > "$EXCERPT"
+    cap_file "$EXCERPT" "$LOG_MAX_BYTES" "summary truncated"
+    { echo "Summary lines:"; cat "$EXCERPT"; echo; } >> "$CTX"
+  fi
+  # The *first* error marker: later steps in the same job add their own, and the
+  # failing step's is the one with the cause above it.
+  #
+  # -m1 rather than `| head -1`: with pipefail, head closing the pipe after one
+  # line sends grep SIGPIPE, grep exits 141, and the guard below swallows it as
+  # "no error marker" -- so the window silently becomes a 120-line tail. Whether
+  # it fires depends on how much grep has buffered, so it misses the small logs
+  # and hits the ones with a marker per diagnostic (tsc, clippy, eslint), which
+  # are exactly the logs where the first-error window is worth the most. -m1 stops
+  # grep at the first match and drops the pipe stage that made the race possible.
+  ERR_LINE=$(grep -n -m1 '##\[error\]' "$JOB_LOG" | cut -d: -f1) || ERR_LINE=''
+  if [ -n "$ERR_LINE" ]; then
+    START=$((ERR_LINE - LOG_WINDOW + 1))
+    if [ "$START" -lt 1 ]; then START=1; fi
+    EXCERPT="${RUNNER_TEMP}/job-${JOB_ID}-window.txt"
+    sed -n "${START},${ERR_LINE}p" "$JOB_LOG" > "$EXCERPT"
+    cap_file "$EXCERPT" "$LOG_MAX_BYTES" \
+      "log excerpt truncated at ${LOG_MAX_BYTES} bytes"
+    {
+      echo "Log lines ${START}-${ERR_LINE}, ending at the first error:"
+      cat "$EXCERPT"
+    } >> "$CTX"
+  else
+    EXCERPT="${RUNNER_TEMP}/job-${JOB_ID}-tail.txt"
+    tail -n "$LOG_WINDOW" "$JOB_LOG" > "$EXCERPT"
+    cap_file "$EXCERPT" "$LOG_MAX_BYTES" \
+      "log excerpt truncated at ${LOG_MAX_BYTES} bytes"
+    { echo "Last ${LOG_WINDOW} log lines:"; cat "$EXCERPT"; } >> "$CTX"
+  fi
+done
+
+# The diff since the reviewer's own last round. REVIEWS is already in hand for the
+# cycle counter, and the last commit_id it submitted against is exactly the base
+# for "what changed since I looked". Ordered by submitted_at, not array order,
+# because inline comments and the round's verdict are separate review objects.
+LAST_REVIEW_JQ='[.[][] | select(.user.login == "claude[bot]") | select(.submitted_at != null) | {commit_id, submitted_at}] | sort_by(.submitted_at) | last | (.commit_id // "")'
+LAST_SHA=$(printf '%s' "$REVIEWS" | jq -s -r "$LAST_REVIEW_JQ" 2>/dev/null) || LAST_SHA=''
+if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" != "null" ] && [ "$LAST_SHA" != "$HEAD_SHA" ]; then
+  SINCE_FILE="${RUNNER_TEMP}/since-last-review.diff"
+  # The compare API, not git: the checkout is fetch-depth 1, so no base branch and
+  # no prior commit exists locally to diff against.
+  #
+  # Ask for the JSON first and only use the diff when the comparison is a clean
+  # fast-forward. compare/A...B is three-dot, so it diffs from the *merge base* of
+  # the two, which equals "since A" only while the branch has done nothing but gain
+  # commits. After a rebase or a squash-and-force-push the old SHA usually stays
+  # reachable, so this call succeeds and returns the whole PR plus anything the
+  # rebase pulled in from upstream -- under a heading that says the opposite. A
+  # reviewer trusting that heading re-raises issues the author already settled, and
+  # SINCE_MAX can drop the part that genuinely is new. status is "ahead" only for
+  # the fast-forward case; "diverged" and "behind" fall through to the message.
+  COMPARE_STATUS_JQ='.status // "unknown"'
+  SINCE_STATUS=$(gh api "repos/${REPO}/compare/${LAST_SHA}...${HEAD_SHA}" 2>/dev/null \
+    | jq -r "$COMPARE_STATUS_JQ" 2>/dev/null) || SINCE_STATUS='unknown'
+  if [ "$SINCE_STATUS" = "ahead" ] \
+    && fetch_raw "$SINCE_FILE" api "repos/${REPO}/compare/${LAST_SHA}...${HEAD_SHA}" \
+    -H "Accept: application/vnd.github.diff"; then
+    # awk, not `wc -l`: wc pads its count with spaces on BSD and the number
+    # is interpolated into the notice below, not just compared.
+    SINCE_LINES=$(awk 'END {print NR}' "$SINCE_FILE")
+    {
+      echo
+      echo "## Diff since your last review (${LAST_SHA} to ${HEAD_SHA})"
+      head -n "$SINCE_MAX" "$SINCE_FILE"
+      if [ "$SINCE_LINES" -gt "$SINCE_MAX" ]; then
+        echo "(truncated: first ${SINCE_MAX} of ${SINCE_LINES} lines)"
+      fi
+    } >> "$CTX"
+  else
+    {
+      echo
+      echo "## Diff since your last review"
+      echo "Unavailable: ${LAST_SHA} does not fast-forward to ${HEAD_SHA}"
+      echo "(comparison status: ${SINCE_STATUS})."
+      echo "The branch was rebased or force-pushed, so there is no meaningful"
+      echo "\"since last review\" diff. Review the full diff below instead, and"
+      echo "read the prior review comments to see what was already raised."
+    } >> "$CTX"
+  fi
+fi
+
+DIFF_FILE="${RUNNER_TEMP}/pr.diff"
+if fetch_raw "$DIFF_FILE" pr diff "$PR_NUMBER" --repo "$REPO"; then
+  DIFF_LINES=$(awk 'END {print NR}' "$DIFF_FILE")
+  {
+    echo
+    echo "## Full diff"
+    # A heading with nothing under it is a claim, and the wrong one: a fetch that
+    # succeeded with no body is not the same fact as a PR with no changes, and the
+    # prompt has just told the reviewer not to re-fetch what it was given.
+    if [ "$DIFF_LINES" -eq 0 ]; then
+      echo "The diff came back empty. That is unusual for a pull request; treat it"
+      echo "as missing rather than as \"nothing changed\" and run gh pr diff."
+    else
+      head -n "$DIFF_MAX" "$DIFF_FILE"
+      if [ "$DIFF_LINES" -gt "$DIFF_MAX" ]; then
+        echo "(truncated: first ${DIFF_MAX} of ${DIFF_LINES} lines; run gh pr diff for the rest)"
+      fi
+    fi
+  } >> "$CTX"
+else
+  echo "::warning::Could not read the diff."
+  { echo; echo "## Full diff"; echo "Could not read the diff; run gh pr diff."; } >> "$CTX"
+fi
+
+# Issue comments, not the pull comments above: the PR conversation is a separate
+# endpoint from the inline review threads, and only the threads were ever passed.
+ISSUE_COMMENTS_JQ='[.[][]] | if length == 0 then "No PR conversation comments." else sort_by(.created_at) | map("--- \(.user.login) at \(.created_at)\n\((.body // "")[0:3000])") | join("\n") end'
+if CONVO_JSON=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate); then
+  CONVO=$(printf '%s' "$CONVO_JSON" | jq -s -r "$ISSUE_COMMENTS_JQ" 2>/dev/null) \
+    || CONVO="Could not parse PR conversation comments."
+else
+  echo "::warning::Could not read PR conversation comments."
+  CONVO="Could not read PR conversation comments."
+fi
+{ echo; echo "## PR conversation"; printf '%s\n' "$CONVO"; } >> "$CTX"
+
+# Last resort against an unbounded block -- the per-block caps above should keep
+# the file far below this, so hitting it means one of them regressed.
+if [ "$(wc -c < "$CTX" | tr -d " ")" -gt "$CTX_MAX_BYTES" ]; then
+  echo "::warning::Review context exceeded ${CTX_MAX_BYTES} bytes and was truncated."
+fi
+cap_file "$CTX" "$CTX_MAX_BYTES" "context truncated at ${CTX_MAX_BYTES} bytes"
+
+CTX_DELIMITER="PR_CONTEXT_$(openssl rand -hex 16)"
+{
+  echo "pr_context<<${CTX_DELIMITER}"
+  strip_block_tags < "$CTX"
+  echo "${CTX_DELIMITER}"
+} >> $GITHUB_OUTPUT
