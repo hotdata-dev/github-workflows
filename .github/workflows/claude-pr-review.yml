@@ -3,9 +3,38 @@ name: Claude PR Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
+  # Callable so this repository's own CI can run this file and prove it starts. That is not a
+  # theoretical worry: an org ruleset injects this workflow into every repo resolved from
+  # `main`, so a pull request here is reviewed by main's copy and never by the copy it is
+  # changing. Twice in one day a file that Actions refuses to parse merged green -- an empty
+  # expression delimiter in a shell comment, then a `run:` block past the 21,000-character
+  # expression limit -- because nothing in CI had ever executed the version under review.
+  #
+  # tests.yml calls this with `uses: ./...`, which resolves from the calling commit, so the
+  # smoke run is the pull request's copy. A copy Actions cannot load fails the caller too, which
+  # is the whole point: "does it start" is exactly what both outages got wrong.
+  workflow_call:
+    inputs:
+      dry_run:
+        description: >-
+          Everything except the review itself. Set by tests.yml, never on the production path,
+          where `inputs` is empty and this reads as false.
+        type: boolean
+        default: false
 
+# Distinct groups for the smoke run and the live review, because a called workflow inherits the
+# caller's `github` context: both would otherwise compute pr-review-<same number> on the same
+# pull request, and cancel-in-progress would have each cancelling the other. A smoke test that
+# kills real reviews is worse than no smoke test.
+#
+# The run_id fallback is for the other event. tests.yml also calls this on `push: branches:
+# [main]`, where there is no pull request and the number expands to nothing, so without it every
+# main-push run shares one constant group -- and cancel-in-progress on a *called* workflow does
+# not just drop the smoke job, it takes the caller's whole Tests run with it. Two merges close
+# together would leave the earlier commit with no test signal on main. run_id is the caller's,
+# and unique per run.
 concurrency:
-  group: pr-review-${{ github.event.pull_request.number }}
+  group: pr-review-${{ inputs.dry_run && 'smoke' || 'live' }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -509,8 +538,19 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
 
+      # The only step a dry run skips, and the only one it needs to: every step after this one
+      # is already gated on this step's outcome or its outputs, so skipping it silences the whole
+      # write side of the workflow without a second condition anywhere.
+      #
+      #   Reduce execution log  -- needs steps.review.outputs.execution_file, empty when skipped
+      #   Upload tool usage     -- needs steps.tool-usage.outcome == 'success', which is 'skipped'
+      #   Notify on failure     -- needs outcome 'failure' or 'cancelled', and this is 'skipped'
+      #
+      # So a smoke run posts no review, no comment and no artifact. Everything before this step
+      # still runs against the live API: the app token, the cross-repo prompt checkout, and the
+      # nine context reads with the job's real permissions.
       - uses: anthropics/claude-code-action@v1
-        if: github.event.pull_request.user.login != 'dependabot[bot]'
+        if: github.event.pull_request.user.login != 'dependabot[bot]' && !inputs.dry_run
         id: review
         continue-on-error: true
         with:
