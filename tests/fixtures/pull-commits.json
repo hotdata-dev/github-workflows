@@ -1,0 +1,14 @@
+[
+  {
+    "sha": "bb3d59d694148a6d0c81c83629d4d4a3b6f8041e",
+    "commit": {
+      "message": "feat(filesystem): incremental object-key sync (append)\n\nFilesystem ingest is now incremental-append instead of full-replace: each\ndrain reads only objects whose key sorts after a persisted watermark.\n\n- control store: sync_state table + get_watermark/set_watermark"
+    }
+  },
+  {
+    "sha": "77f4a9a890b4576ad32109c61214c73dbfd6e074",
+    "commit": {
+      "message": "feat(ingest): POST /jobs/sync + continuous flag"
+    }
+  }
+]

@@ -1,0 +1,20 @@
+[
+  {
+    "id": 3001,
+    "user": { "login": "zfarrell" },
+    "created_at": "2026-08-02T18:04:11Z",
+    "body": "Holding this until the watermark migration lands in staging."
+  },
+  {
+    "id": 2999,
+    "user": { "login": "claude[bot]" },
+    "created_at": "2026-08-02T17:12:00Z",
+    "body": "## Review\n\n### Blocking Issues\n- `api/app.py:912` watermark advances before the load is confirmed."
+  },
+  {
+    "id": 3002,
+    "user": { "login": "hotdata-automation[bot]" },
+    "created_at": "2026-08-03T09:00:00Z",
+    "body": null
+  }
+]
