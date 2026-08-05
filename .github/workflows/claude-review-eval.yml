@@ -1,0 +1,235 @@
+name: Reviewer Eval
+
+# Grades the reviewer against the scenarios in tests/eval/ by putting real pull requests in front
+# of it, in hotdata-dev/pr-review-eval, and reading what it did to them.
+#
+# The reviewer is not invoked directly here. Each scenario's head branch gets a *copy* of the
+# reviewer workflow committed into it, and GitHub runs that copy on the scenario's own pull request
+# -- so what gets graded is the real file on the real `pull_request` path, with
+# github.event.pull_request.* resolving naturally, rather than a harness imitating it. Two things
+# follow from that, and both are the point:
+#
+#   The candidate is the version under review. The copy comes from this checkout, so a pull request
+#   that changes the reviewer workflow or the prompt document is evaluated as changed. The org
+#   ruleset resolves the production reviewer from main, so nothing else gives a prompt edit any
+#   pre-merge exposure -- PR #27's dry run loads the candidate workflow but skips the model step.
+#
+#   The reviewer is an input, not an assumption. `reviewer_workflow` and `reviewer_login` are all
+#   that tie this to Claude. Drop a different reviewer workflow in the repository, point these two
+#   at it, and every scenario and assertion applies unchanged, because tests/eval-grade.py grades
+#   pull request state rather than any harness's transcript.
+#
+# Non-blocking on purpose. It reports pass rates and comments them; it does not fail the pull
+# request. The thing under test is not deterministic, so scenarios pass on a threshold out of
+# repeats, and a check that goes red on sampling noise gets ignored within a week. Promote
+# individual scenarios to blocking once their observed rate justifies it.
+#
+# Why pull requests never target the sandbox's default branch: the org ruleset that requires the
+# reviewer workflow is scoped to ~DEFAULT_BRANCH, so a pull request against main there would be
+# reviewed twice -- once by main's required copy and once by the injected candidate -- and the
+# grader could not tell which verdict belonged to the version under test. Throwaway base branches
+# put the scenario outside the ruleset rather than carving an exception into org-wide config.
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: Comma-separated scenario names, or "all"
+        default: all
+      repeats:
+        description: Override each scenario's repeats (blank to use meta.json)
+        default: ""
+      reviewer_workflow:
+        description: Path to the reviewer workflow to inject
+        default: .github/workflows/claude-pr-review.yml
+      reviewer_login:
+        description: Login the reviewer posts as
+        default: claude[bot]
+  schedule:
+    # Nightly, after hours. Enough repeats to see drift; see the repeats resolution in `plan`.
+    - cron: "0 9 * * *"
+  pull_request:
+    paths:
+      - docs/claude-pr-review-prompt.md
+      - .github/workflows/claude-pr-review.yml
+      - .github/workflows/claude-review-eval.yml
+      - tests/eval/**
+      - tests/eval-grade.py
+
+concurrency:
+  # Never two eval runs at once: they share one sandbox repository, and a cancelled run's cleanup
+  # step is the only thing that deletes its branches.
+  group: reviewer-eval
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  SANDBOX: hotdata-dev/pr-review-eval
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 1
+
+      # Scenario validity is asserted by tests/eval-test.sh in the Tests workflow, not here. This
+      # step only expands scenarios into one matrix entry per repeat.
+      - name: Build the matrix
+        id: plan
+        run: |
+          python3 .github/scripts/eval.py plan >> "$GITHUB_OUTPUT"
+        env:
+          # On a pull request, one repeat per scenario: the point there is to see whether the
+          # change under review moved a verdict, and 8 reviews is already a few dollars. The
+          # nightly run uses each scenario's own repeats, which is where thresholds mean anything.
+          EVAL_SCENARIOS: ${{ inputs.scenarios || 'all' }}
+          EVAL_REPEATS: ${{ inputs.repeats || (github.event_name == 'pull_request' && '1' || '') }}
+
+  review:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      # One scenario at a time would take an hour; all at once floods the sandbox and the API. The
+      # reviewer workflow itself has a 15-minute timeout, so the slow part is waiting, not compute.
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 1
+
+      # Two tokens, deliberately. GITHUB_TOKEN cannot be used to open the scenario pull request:
+      # events created with it do not trigger workflows, so the injected reviewer would never run
+      # and every scenario would grade as "none". A GitHub App installation token does trigger
+      # them. It is also the only token here with write access to another repository.
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: Iv23liKBX2RYMoZIYuKa
+          private-key: ${{ secrets.HOTDATA_AUTOMATION_PRIVATE_KEY }}
+          owner: hotdata-dev
+          repositories: pr-review-eval
+
+      - name: Stage the scenario branches
+        id: stage
+        run: python3 .github/scripts/eval.py stage
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SCENARIO: ${{ matrix.scenario }}
+          REPEAT: ${{ matrix.repeat }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REVIEWER_WORKFLOW: ${{ inputs.reviewer_workflow || '.github/workflows/claude-pr-review.yml' }}
+
+      - name: Open the scenario pull request and wait for the review
+        id: review
+        run: python3 .github/scripts/eval.py run
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SCENARIO: ${{ matrix.scenario }}
+          BASE_BRANCH: ${{ steps.stage.outputs.base_branch }}
+          HEAD_BRANCH: ${{ steps.stage.outputs.head_branch }}
+          HEAD_SHA: ${{ steps.stage.outputs.head_sha }}
+          REVIEWER_WORKFLOW: ${{ inputs.reviewer_workflow || '.github/workflows/claude-pr-review.yml' }}
+          REVIEWER_LOGIN: ${{ inputs.reviewer_login || 'claude[bot]' }}
+          WAIT_FOR_PUSH_CHECKS: ${{ steps.stage.outputs.wait_for_push_checks }}
+
+      # Grading is separate from running so a grader change can be re-tested against a finished
+      # run's payloads, and so this step is the same code tests/eval-test.sh pins offline.
+      - name: Grade
+        id: grade
+        if: always() && steps.review.outcome != 'skipped'
+        continue-on-error: true
+        run: |
+          python3 tests/eval-grade.py \
+            --meta "tests/eval/${SCENARIO}/meta.json" \
+            --reviews "${RUNNER_TEMP}/reviews.json" \
+            --comments "${RUNNER_TEMP}/comments.json" \
+            --convo "${RUNNER_TEMP}/convo.json" \
+            --reviewer "$REVIEWER_LOGIN" \
+            > "${RUNNER_TEMP}/result-${SCENARIO}-${REPEAT}.json"
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          REPEAT: ${{ matrix.repeat }}
+          REVIEWER_LOGIN: ${{ inputs.reviewer_login || 'claude[bot]' }}
+
+      - name: Show the result
+        if: always() && steps.grade.outcome != 'skipped'
+        run: |
+          python3 .github/scripts/eval.py summarise \
+            "${RUNNER_TEMP}/result-${SCENARIO}-${REPEAT}.json" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          REPEAT: ${{ matrix.repeat }}
+
+      - name: Upload the result
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: eval-result-${{ matrix.scenario }}-${{ matrix.repeat }}
+          path: ${{ runner.temp }}/result-*.json
+          if-no-files-found: ignore
+          retention-days: 14
+          overwrite: true
+
+      # Always, including on cancellation: a leaked branch pair is the only state this workflow
+      # can leave behind, and the sandbox is shared by every future run.
+      - name: Clean up
+        if: always()
+        continue-on-error: true
+        run: python3 .github/scripts/eval.py cleanup
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASE_BRANCH: ${{ steps.stage.outputs.base_branch }}
+          HEAD_BRANCH: ${{ steps.stage.outputs.head_branch }}
+
+  report:
+    needs: [plan, review]
+    if: always() && needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 1
+
+      - uses: actions/download-artifact@v6.0.0
+        continue-on-error: true
+        with:
+          path: results
+          pattern: eval-result-*
+          merge-multiple: true
+
+      # Thresholds are applied here rather than per job, because a threshold is a statement about a
+      # scenario's repeats and no single job can see them all.
+      - name: Aggregate
+        id: aggregate
+        run: |
+          python3 .github/scripts/eval.py report results > "${RUNNER_TEMP}/report.md"
+          cat "${RUNNER_TEMP}/report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the pull request
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "${RUNNER_TEMP}/report.md"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}

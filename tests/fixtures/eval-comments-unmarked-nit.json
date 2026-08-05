@@ -1,0 +1,9 @@
+[
+  {
+    "id": 200,
+    "user": {"login": "claude[bot]", "type": "Bot"},
+    "path": "ingest/incremental.py",
+    "line": 31,
+    "body": "nit: rename `since` to `watermark` for symmetry with `_advance_watermark`."
+  }
+]

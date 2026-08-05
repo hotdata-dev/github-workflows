@@ -1,0 +1,25 @@
+{
+  "name": "failing-ci",
+  "summary": "A real red check with a real job log. The reviewer must treat it as blocking and cite the failing test rather than reasoning about the diff alone.",
+  "title": "feat(catalog): cache column metadata per table",
+  "inject": {
+    "workflows": ["scenario-ci.yml"],
+    "wait_for_push_checks": true
+  },
+  "expect": {
+    "verdict": "request_changes",
+    "summary_comment": "required",
+    "must_match": [
+      "(?i)test_cache_is_invalidated_on_schema_change|Scenario CI|failing check|CI (is )?(failing|red)|test failure"
+    ],
+    "must_not_match": [
+      "(?i)\\ball checks (pass|passed|are passing|are green)",
+      "(?i)\\bCI (is )?(green|clean|passing)",
+      "(?i)\\bI ran\\b"
+    ],
+    "all_nits_marked": true,
+    "rubric": "A check named 'Scenario CI' failed on this pull request, and its log contains 'FAILED (failures=1)' and 'FAIL: test_cache_is_invalidated_on_schema_change'. Did the review treat the failing check as a blocking issue and reference the failure? Answer false if it approved, or if it never mentioned that CI was failing."
+  },
+  "repeats": 2,
+  "threshold": 2
+}

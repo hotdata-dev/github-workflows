@@ -1,0 +1,14 @@
+[
+  {
+    "id": 300,
+    "user": {"login": "claude[bot]", "type": "Bot"},
+    "created_at": "2026-08-05T12:00:41Z",
+    "body": "## Review\n\n### Blocking Issues\n- `ingest/incremental.py:31` advances the watermark to max(updated_at) and the next run filters with a strict `>`, so rows written with that same updated_at after this read are skipped permanently.\n\n### Action Required\nStore the watermark exclusive of the final row, or re-read the boundary value on the next run."
+  },
+  {
+    "id": 301,
+    "user": {"login": "hotdata-automation[bot]", "type": "Bot"},
+    "created_at": "2026-08-05T12:00:01Z",
+    "body": "Eval scenario: hidden-bug"
+  }
+]

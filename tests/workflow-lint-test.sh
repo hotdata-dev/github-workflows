@@ -196,6 +196,113 @@ elif [ "$review_perms" != "$smoke_perms" ]; then
 else
   echo "ok   the smoke job grants exactly what the review job declares"
 fi
+# The second outage, and the second thing nothing here could see. A block scalar containing a
+# `${OPEN} ... ${CLOSE}` interpolation is not passed through as text: Actions compiles the whole
+# scalar into a single `format('...literal...{0}', expr)` expression, and a single expression is
+# capped at 21,000 characters. Over the cap the workflow fails validation with
+#
+#   Exceeded max expression length 21000
+#
+# which is fatal at *startup*: the run is created, concludes `failure` in 0s with zero jobs, and
+# reports no check at all. Same blast radius as the empty-expression outage above -- the required
+# check never reports and every pull request in the org blocks -- and same invisibility. The file
+# is valid YAML, the shell runs fine, actionlint 1.7.12 does not model the limit (rhysd/actionlint
+# issue 356 is the open request for it), and this suite passed on the broken commit.
+#
+# The numbers, measured on the two commits either side of it, because they are what makes the
+# threshold real rather than a guess:
+#
+#   1f12c05 (broken, PR #26 merged)  24,860 characters, 2 expressions  -> org blocked
+#   8b04393 (the revert)             20,545 characters, 2 expressions  -> starts, 455 to spare
+#
+# Two consequences worth stating, since between them they are the whole reason this check is
+# shaped the way it is.
+#
+# It is the *dedented* value that counts, not the lines in the file. The run block is indented ten
+# spaces and is several hundred lines long, so the raw text measures ~4,300 characters more than
+# the string GitHub compiles -- enough to put the passing revision over the cap and the failing one
+# further over, i.e. enough to make a naive count report the wrong verdict on both.
+#
+# And the cap applies to a scalar only *because* it interpolates. A block with no expression in it
+# is plain text at any length, which means the same 20,000-character script is legal or fatal
+# depending on one `${OPEN} github.repository ${CLOSE}`. That is a trap rather than a rule, so a
+# long block gets a warning here before it has an expression in it, not after.
+EXPR_MAX=21000
+# Warn from 90% -- 455 characters of headroom is about six comment lines in a file whose entire
+# convention is dense explanatory comments, so "under the cap" is not the same as "safe".
+EXPR_WARN=18900
+
+for wf in "${WORKFLOWS[@]}"; do
+  # Block scalars only: a plain or quoted scalar cannot reach five figures, and the two outages
+  # both arrived through `run: |`. block_indent is the key's indent + 2 because a block scalar's
+  # content is indented at least one level past the key, and that prefix is stripped from the
+  # value -- measuring it would reintroduce the error described above.
+  measured=$(awk -v max="$EXPR_MAX" -v warn="$EXPR_WARN" '
+    function report(   verdict) {
+      if (nexpr > 0 && len > max)       verdict = "FATAL"
+      else if (nexpr > 0 && len > warn) verdict = "TIGHT"
+      else if (len > max)               verdict = "LATENT"
+      else                              return
+      printf "%s\t%s\t%d\t%d\t%d\n", verdict, key, len, nexpr, start
+    }
+    {
+      indent = match($0, /[^ ]/) - 1
+      if (indent < 0) indent = length($0)
+      if (in_block) {
+        # A blank line inside a block scalar is one newline in the value regardless of what
+        # whitespace it holds, and it must not close the block.
+        if ($0 ~ /^[ \t]*$/) { len += 1; next }
+        if (indent >= block_indent) {
+          len += length(substr($0, block_indent + 1)) + 1
+          nexpr += gsub(/\$\{\{/, "&")
+          next
+        }
+        report()
+        in_block = 0
+      }
+      if ($0 ~ /:[ \t]*[|>][-+0-9]*[ \t]*$/) {
+        key = $0
+        sub(/^[ \t]*/, "", key); sub(/:[ \t]*[|>].*$/, "", key)
+        in_block = 1; block_indent = indent + 2; len = 0; nexpr = 0; start = FNR
+      }
+    }
+    END { if (in_block) report() }
+  ' "$wf") || {
+    echo "FAIL the expression-length scan itself failed on $wf; the scan proves nothing"
+    failures=$((failures + 1))
+    continue
+  }
+
+  if [ -z "$measured" ]; then
+    echo "ok   $wf has no interpolated block near the ${EXPR_MAX}-character expression cap"
+    continue
+  fi
+  while IFS=$'\t' read -r verdict key len nexpr start; do
+    [ -n "$verdict" ] || continue
+    case $verdict in
+      FATAL)
+        echo "FAIL $wf:$start: \`$key:\` is $len characters with $nexpr expression(s), over the"
+        echo "     ${EXPR_MAX}-character cap. Actions will refuse to start this workflow:"
+        echo "     \"Exceeded max expression length ${EXPR_MAX}\" -- no jobs, no check, every pull"
+        echo "     request in the org blocked. Either shorten it, or move the expressions into"
+        echo "     \`env:\` so the block stops being an expression template at all."
+        failures=$((failures + 1))
+        ;;
+      TIGHT)
+        echo "warn $wf:$start: \`$key:\` is $len of ${EXPR_MAX} characters with $nexpr"
+        echo "     expression(s) -- $((EXPR_MAX - len)) to spare. Moving the expressions into"
+        echo "     \`env:\` removes the cap entirely."
+        ;;
+      LATENT)
+        echo "warn $wf:$start: \`$key:\` is $len characters, over the ${EXPR_MAX}-character"
+        echo "     expression cap but legal because it interpolates nothing. Adding a single"
+        echo "     \`${OPEN} ... ${CLOSE}\` to it would make this workflow unstartable."
+        ;;
+    esac
+  done <<EOF
+$measured
+EOF
+done
 
 # The scan above is a backstop for one class. actionlint checks the schema, the expression
 # grammar, and the shell; run it when it is on PATH. shellcheck findings are excluded because

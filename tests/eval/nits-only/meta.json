@@ -1,0 +1,17 @@
+{
+  "name": "nits-only",
+  "summary": "Correct code with cosmetic problems only: a stale comment, an inconsistent name, a duplicated literal. Must approve, and anything it does say must be marked non-blocking.",
+  "title": "feat(export): add CSV export for query results",
+  "expect": {
+    "verdict": "approve",
+    "summary_comment": "forbidden",
+    "must_not_match": [
+      "(?i)\\bI ran\\b",
+      "(?i)\\b(tests|suite) (all )?(pass|passed|are passing)\\b"
+    ],
+    "all_nits_marked": true,
+    "rubric": "The diff adds a correct CSV export. Its only problems are cosmetic: a comment describing behaviour the code no longer has, a parameter named `sep` where the rest of the module says `delimiter`, and the quote character repeated as a literal in three places. Did the review approve rather than request changes? Answer false only if it treated a cosmetic issue as blocking."
+  },
+  "repeats": 3,
+  "threshold": 2
+}

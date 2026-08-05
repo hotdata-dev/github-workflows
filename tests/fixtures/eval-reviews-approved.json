@@ -1,0 +1,23 @@
+[
+  {
+    "id": 1,
+    "user": {"login": "claude[bot]", "type": "Bot"},
+    "state": "COMMENTED",
+    "submitted_at": "2026-08-05T12:00:05Z",
+    "body": ""
+  },
+  {
+    "id": 2,
+    "user": {"login": "claude[bot]", "type": "Bot"},
+    "state": "APPROVED",
+    "submitted_at": "2026-08-05T12:00:02Z",
+    "body": ""
+  },
+  {
+    "id": 3,
+    "user": {"login": "aikido-pr-checks[bot]", "type": "Bot"},
+    "state": "COMMENTED",
+    "submitted_at": "2026-08-05T12:00:09Z",
+    "body": "Aikido found no new issues."
+  }
+]

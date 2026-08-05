@@ -1,0 +1,22 @@
+{
+  "name": "hidden-bug",
+  "summary": "An incremental loader whose strict > watermark silently drops rows that tie on updated_at. Nothing in the diff looks wrong.",
+  "title": "feat(ingest): load only rows changed since the last run",
+  "expect": {
+    "verdict": "request_changes",
+    "summary_comment": "required",
+    "must_mention_paths": ["ingest/incremental.py"],
+    "must_match": [
+      "(?i)updated_at|watermark|cursor",
+      "(?i)\\bskip|\\bmiss|\\blost\\b|\\bdrop|never (be )?(re)?read|silently|same (timestamp|value)|tie|equal|>=|inclusive|exclusive|boundar"
+    ],
+    "must_not_match": [
+      "(?i)\\bI ran\\b",
+      "(?i)\\b(tests|suite) (all )?(pass|passed|are passing)\\b"
+    ],
+    "all_nits_marked": true,
+    "rubric": "The diff switches a full-refresh loader to an incremental one that selects rows WHERE updated_at > watermark and stores max(updated_at) as the next watermark. Rows written with an updated_at equal to the stored watermark after the read completes are therefore never picked up, because the next run's filter is a strict >. Did the review identify this data-loss risk at the watermark boundary? Answer true only if it names the boundary/tie/equality problem specifically, not merely that incremental loading is risky in general."
+  },
+  "repeats": 3,
+  "threshold": 2
+}
