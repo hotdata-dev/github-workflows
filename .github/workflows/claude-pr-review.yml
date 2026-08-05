@@ -132,11 +132,6 @@ jobs:
           # line has no length limit, so a base64 or JSON dump next to the first error marker
           # would otherwise consume the whole context ahead of the diff.
           LOG_MAX_BYTES=40000
-          # The description's own budget. GitHub allows 65,536 characters, and every one of
-          # them is author-controlled text appended ahead of the diff, so this is the block
-          # that decides whether the diff still fits. 40 KB is ~10x the largest real
-          # description in the corpus and a sixth of the total.
-          BODY_MAX_BYTES=40000
           CTX="${RUNNER_TEMP}/pr-context.md"
           : > "$CTX"
 
@@ -259,59 +254,19 @@ jobs:
           # runner image. `</pr_context >`, `</PR_CONTEXT>` and `< / pr_context foo="1">` all
           # read as the same delimiter to a model, so matching the shape is the only version
           # of this that is not walked around by whitespace.
-          #
-          # Second substitution, same pass, different sink. Actions reads a log line whose
-          # first non-blank characters are `::` or `##[` as a *workflow command* rather than
-          # as text, and the action echoes the assembled prompt into the job log line by
-          # line -- so a marker anywhere in a PR body, a diff hunk, or a prior review comment
-          # becomes a real annotation on the review's own check run. Run 30964274400 carries
-          # two `failure` annotations whose text is prose from a review comment discussing
-          # `##[error]`; the run still concluded success, so what this costs is a red mark on
-          # a green check, not a broken review.
-          #
-          # The two spellings are not parsed the same way, and the difference decides the fix.
-          # Run 31025325888 settles it -- one review whose diff carried both forms on `+`
-          # prefixed lines:
-          #
-          #   `+##[error]this is not really an error`  -> the `+` was consumed, annotation fired
-          #   `+::error::neither is this`              -> the `+` survived, nothing fired
-          #
-          # So `::command::` is matched only at the start of a trimmed line, while `##[...]`
-          # is matched *anywhere in the line*. Every one of that run's seven annotations was a
-          # `##[error]` and none was a `::`. A leading `+`, a timestamp, or a markdown backtick
-          # is therefore no protection at all for the `##[` form -- which is why the CI excerpt
-          # is the most reliable source of these, not an exempt one: it fetches the window
-          # around `##[error]` from a log whose every line the API has already timestamped.
-          #
-          # Hence two rules. `##[` is broken wherever it appears, by one space, because the
-          # lines carrying it are usually source or log text and restructuring them would
-          # misrepresent the file the reviewer is reading. A line-leading `::` gets the visible
-          # marker instead: there the whole line was the command, so there is no file content
-          # to preserve. Both keep the text legible, which matters because the reviewer is
-          # often reading an excerpt that is *about* an error line.
-          neutralise_untrusted() {
-            perl -pe '
-              s{< \s* /? \s* (?: pr_context | prior_review_comments ) [^>]* >}{[block tag removed]}gix;
-              s{\#\# (?= \[ [A-Za-z] [^\]]* \] )}{## }gx;
-              s{^ (\s*) (?= :: )}{${1}[log marker neutralised] }x;
-            '
+          strip_block_tags() {
+            perl -pe 's{< \s* /? \s* (?: pr_context | prior_review_comments ) [^>]* >}{[block tag removed]}gix'
           }
 
-          # Neutralise into the file, then cap -- never the other way round. These
-          # substitutions *grow* the text: a bare `::` line goes from 3 bytes to 28, so a cap
-          # enforced before them stops bounding the step output, and 100 KB of `::`-only
-          # comment lines would leave here as ~930 KB. Capping afterwards is safe in the only
-          # direction that matters, because head -c drops the tail and cannot re-expose a
-          # marker the prefix was covering.
           THREADS_FILE="${RUNNER_TEMP}/threads.md"
-          printf '%s\n' "$THREADS" | neutralise_untrusted > "$THREADS_FILE"
+          printf '%s\n' "$THREADS" > "$THREADS_FILE"
           cap_file "$THREADS_FILE" "$THREADS_MAX_BYTES" \
             "prior review comments truncated at ${THREADS_MAX_BYTES} bytes; read the rest with gh pr view"
 
           DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
           {
             echo "threads<<${DELIMITER}"
-            cat "$THREADS_FILE"
+            strip_block_tags < "$THREADS_FILE"
             echo "${DELIMITER}"
           } >> $GITHUB_OUTPUT
 
@@ -335,29 +290,6 @@ jobs:
             } >> "$CTX"
           fi
 
-          # The description gets its own cap, on *sanitised* bytes, because it was the one
-          # untrusted block with no bound of its own and the blocks are appended in order.
-          # Everything above measures what it appends -- the log excerpts are line-bounded, the
-          # diffs are line-capped -- so an uncapped block here does not merely inflate the
-          # output, it spends the budget that `## Full diff` below was going to use. 65,536
-          # characters of `::` lines is ~610 KB after neutralisation against a 200 KB total, so
-          # `head -c` would cut a third of the way into the description and every block after
-          # it, the diff included, would simply be absent.
-          #
-          # Neutralising here as well as in the whole-file pass is deliberate and safe: both
-          # substitutions are idempotent (`## [error]` no longer matches `##\[`, and a prefixed
-          # line no longer starts with `::`), so the second pass is a no-op over this text. The
-          # whole-file pass stays because it is what guarantees nothing was missed; this one
-          # exists so the cap measures the bytes that actually leave.
-          BODY_FILE="${RUNNER_TEMP}/pr-body.md"
-          if [ -n "${PR_BODY}" ]; then
-            printf '%s\n' "${PR_BODY}" | neutralise_untrusted > "$BODY_FILE"
-          else
-            echo "(no description)" > "$BODY_FILE"
-          fi
-          cap_file "$BODY_FILE" "$BODY_MAX_BYTES" \
-            "description truncated at ${BODY_MAX_BYTES} bytes; read the rest with gh pr view"
-
           {
             echo "## Pull request"
             echo "Title: ${PR_TITLE}"
@@ -365,7 +297,7 @@ jobs:
             echo "Head SHA: ${HEAD_SHA}"
             echo
             echo "### Description"
-            cat "$BODY_FILE"
+            if [ -n "${PR_BODY}" ]; then printf '%s\n' "${PR_BODY}"; else echo "(no description)"; fi
           } >> "$CTX"
 
           # Each block: read, project, and fall back to a sentence saying what is missing.
@@ -557,11 +489,6 @@ jobs:
           fi
           { echo; echo "## PR conversation"; printf '%s\n' "$CONVO"; } >> "$CTX"
 
-          # Before the size check, for the reason given at the threads file: the substitutions
-          # grow the text, so the budget has to be enforced on what actually leaves the step.
-          neutralise_untrusted < "$CTX" > "${CTX}.clean"
-          mv "${CTX}.clean" "$CTX"
-
           # Last resort against an unbounded block -- the per-block caps above should keep
           # the file far below this, so hitting it means one of them regressed.
           if [ "$(wc -c < "$CTX" | tr -d " ")" -gt "$CTX_MAX_BYTES" ]; then
@@ -572,7 +499,7 @@ jobs:
           CTX_DELIMITER="PR_CONTEXT_$(openssl rand -hex 16)"
           {
             echo "pr_context<<${CTX_DELIMITER}"
-            cat "$CTX"
+            strip_block_tags < "$CTX"
             echo "${CTX_DELIMITER}"
           } >> $GITHUB_OUTPUT
         env:
@@ -646,7 +573,7 @@ jobs:
           # norm strips the wrappers the reviewer puts in front of a real command (timeout,
           # cd .. &&, env VAR=x) so they do not all collapse into "other". verb returns the
           # first matching label or "other" -- the output is always one of these literals.
-          CMD_JQ='def norm: sub("^\\s+"; "") | sub("^timeout\\s+[0-9]+m?\\s+"; "") | sub("^cd\\s+[^&|;]+&&\\s*"; "") | sub("^env\\s+\\S+=\\S+\\s+"; ""); def verb: . as $c | ([[["^gh\\s+pr\\s+diff", "gh pr diff"], ["^gh\\s+pr\\s+view", "gh pr view"], ["^gh\\s+pr\\s+checks", "gh pr checks"], ["^gh\\s+pr\\s+review", "gh pr review"], ["^gh\\s+pr\\s+comment", "gh pr comment"], ["^gh\\s+api", "gh api"], ["^gh\\s", "gh other"], ["^git\\s+diff", "git diff"], ["^git\\s+log", "git log"], ["^git\\s+show", "git show"], ["^git\\s+blame", "git blame"], ["^git\\s", "git other"], ["^rg\\b", "rg"], ["^grep\\b", "grep"], ["^(fd|find)\\b", "find"], ["^(ls|tree)\\b", "ls"], ["^(sed|awk)\\b", "sed/awk"], ["^(cat|head|tail|wc)\\b", "cat/head/tail"], ["^(pytest|uv|python3?|cargo|npm|pnpm|yarn|bun|node|go|make|ruff|mypy|pyflakes)\\b", "run tests/build"]][] | select(.[0] as $re | $c | test($re))] | .[0] // ["", "other"]) | .[1]; def unquoted: gsub("\"[^\"]*\""; "") | gsub("\u0027[^\u0027]*\u0027"; ""); def classify: {cmd: (norm | verb), compound: (unquoted | test("\\||&&|;|>")), has_subst: test("`|\\$\\(")}; def toolname: if type == "string" and test("^[A-Za-z0-9_-]{1,64}$") then . else "unknown" end;'
+          CMD_JQ='def norm: sub("^\\s+"; "") | sub("^timeout\\s+[0-9]+m?\\s+"; "") | sub("^cd\\s+[^&|;]+&&\\s*"; "") | sub("^env\\s+\\S+=\\S+\\s+"; ""); def verb: . as $c | ([[["^gh\\s+pr\\s+diff", "gh pr diff"], ["^gh\\s+pr\\s+view", "gh pr view"], ["^gh\\s+pr\\s+checks", "gh pr checks"], ["^gh\\s+pr\\s+review", "gh pr review"], ["^gh\\s+pr\\s+comment", "gh pr comment"], ["^gh\\s+api", "gh api"], ["^gh\\s", "gh other"], ["^git\\s+diff", "git diff"], ["^git\\s+log", "git log"], ["^git\\s+show", "git show"], ["^git\\s+blame", "git blame"], ["^git\\s", "git other"], ["^rg\\b", "rg"], ["^grep\\b", "grep"], ["^(fd|find)\\b", "find"], ["^(ls|tree)\\b", "ls"], ["^(sed|awk)\\b", "sed/awk"], ["^(cat|head|tail|wc)\\b", "cat/head/tail"], ["^(pytest|uv|python3?|cargo|npm|pnpm|yarn|bun|node|go|make|ruff|mypy|pyflakes)\\b", "run tests/build"]][] | select(.[0] as $re | $c | test($re))] | .[0] // ["", "other"]) | .[1]; def unquoted: gsub("\"[^\"]*\""; "") | gsub("\u0027[^\u0027]*\u0027"; ""); def classify: {cmd: (norm | verb), compound: (unquoted | test("\\||&&|;|>"))}; def toolname: if type == "string" and test("^[A-Za-z0-9_-]{1,64}$") then . else "unknown" end;'
           # commands and denied_commands answer two different questions: what the reviewer
           # spends its Bash budget on, and which of those the allowlist refuses. compound is
           # carried separately because an allowlisted command still gets denied when it is
@@ -654,20 +581,7 @@ jobs:
           # tested against the command with quoted spans removed, because `rg -n \"a|b\"` is
           # one allowlisted command and counting its alternation as a pipe would inflate
           # exactly the number the flag exists to produce.
-          #
-          # has_subst is the same kind of flag for the denials that outlived the frontloaded
-          # context. Reads mostly stopped being refused once the context arrived in the
-          # prompt -- denials fell from 5.2 a run to 0.3 -- and what is left is the *write*
-          # path: 4 of the first 16 runs were refused on `gh pr review` or `gh pr comment`,
-          # both allowlisted, one of them three times before the review landed. The standing
-          # hypothesis is the review body rather than the command: a body is markdown, and a
-          # backtick inside a double-quoted argument is command substitution to anything
-          # parsing shell. So the flag is tested against the *raw* command, not the unquoted
-          # form compound uses -- stripping quoted spans first would remove precisely the
-          # backticks in question. It rides on `commands` as well as `denied_commands`
-          # because a denial rate needs its base rate to mean anything. Boolean, like
-          # compound: a label, never a span of the command.
-          TOOL_USAGE_JQ='{tool_calls: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name | toolname] | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), commands: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | (.input.command // "") | classify] | group_by([.cmd, .compound, .has_subst]) | map({cmd: .[0].cmd, compound: .[0].compound, has_subst: .[0].has_subst, n: length}) | sort_by(-.n)), denials: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(.tool_name | toolname) | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), denied_commands: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(select(.tool_name == "Bash") | (.tool_input.command // "") | classify) | group_by([.cmd, .compound, .has_subst]) | map({cmd: .[0].cmd, compound: .[0].compound, has_subst: .[0].has_subst, n: length}) | sort_by(-.n)), result: (([.[]? | select(.type=="result")] | last // {}) | {subtype, is_error, num_turns, duration_ms, total_cost_usd})}'
+          TOOL_USAGE_JQ='{tool_calls: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name | toolname] | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), commands: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | (.input.command // "") | classify] | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), denials: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(.tool_name | toolname) | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), denied_commands: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(select(.tool_name == "Bash") | (.tool_input.command // "") | classify) | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), result: (([.[]? | select(.type=="result")] | last // {}) | {subtype, is_error, num_turns, duration_ms, total_cost_usd})}'
           jq "$CMD_JQ $TOOL_USAGE_JQ" "$EXECUTION_FILE" > "${RUNNER_TEMP}/claude-tool-usage.json"
         env:
           # Via env, not a ${{ }} interpolation inside the script, so the path cannot be

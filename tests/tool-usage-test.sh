@@ -141,60 +141,6 @@ expect_compound "rg -n 'a|b' src/ | head -20" true \
 expect_compound 'rg -n foo src/' false \
   "a plain search is not compound"
 
-# has_subst answers the denial the frontloaded context did not remove: an allowlisted
-# `gh pr review` refused on the way to posting. Unlike compound it is tested against the raw
-# command, because the suspected trigger lives *inside* the quoted body -- a review body is
-# markdown, and backticks in a double-quoted argument are command substitution to anything
-# parsing shell. Running it through `unquoted` first would delete the evidence.
-subst_of() {
-  printf '%s' "$1" | jq -R -r "$CMD_JQ classify | .has_subst | tostring"
-}
-# expect_subst <command> <true|false> <description>
-expect_subst() {
-  local actual
-  actual=$(subst_of "$1")
-  if [ "$actual" = "$2" ]; then
-    echo "ok   $3"
-  else
-    echo "FAIL $3: expected has_subst=$2, got $actual for: $1"
-    failures=$((failures + 1))
-  fi
-}
-
-expect_subst 'gh pr review 21 --approve --body "nit: `foo` is wrong"' true \
-  "a backtick inside the review body is flagged"
-expect_subst 'gh pr comment 21 --body "see $(basename x)"' true \
-  "an explicit command substitution is flagged"
-expect_subst 'gh pr review 21 --approve --body "no markdown here"' false \
-  "a plain body is not flagged"
-expect_subst 'rg -n foo src/' false \
-  "a plain search is not flagged"
-# The distinction from compound, stated as an assertion: quoted spans are removed for one
-# flag and kept for the other, so a body whose only shell-ish characters are backticks is
-# has_subst without being compound. Getting these the same way round would make the two
-# columns redundant and lose the write-path denials again.
-expect_compound 'gh pr review 21 --approve --body "nit: `foo` is wrong"' false \
-  "a backtick in a quoted body is not compound"
-
-# End to end over the shape actually seen in production: the reviewer's first
-# `gh pr review --request-changes` was refused, and the retry that landed carried the same
-# feedback with the backticks removed. Both rows are `gh pr review`; has_subst is the only
-# thing that tells them apart, which is the whole reason it is grouped on.
-expect_jq execution-log-review-body.json \
-  '[.commands[] | {cmd, has_subst, n}] | sort_by(.has_subst)' \
-  '[{"cmd":"gh pr review","has_subst":false,"n":1},{"cmd":"gh pr review","has_subst":true,"n":1}]' \
-  "the flagged and unflagged attempts are counted apart"
-expect_jq execution-log-review-body.json '.denied_commands' \
-  '[{"cmd":"gh pr review","compound":false,"has_subst":true,"n":1}]' \
-  "the denied review post is flagged and not compound"
-
-# Same boundary as every other label: the flag is a boolean, so no part of the body it was
-# computed from may ride along with it.
-expect_absent execution-log-review-body.json "GetUpdates.tsx" \
-  "the review body does not reach the artifact"
-expect_absent execution-log-review-body.json "rateLimit" \
-  "code quoted in the review body does not reach the artifact"
-
 # The containment assertion, and the one that has to keep holding: every label the
 # projection emits is a literal in CMD_JQ. Nothing derived from the transcript can satisfy
 # it, so the artifact cannot grow a credential path, a search pattern, or a file name
@@ -256,7 +202,7 @@ if printf '%s' "$leaked" | grep -qF "ghs_FAKETOKENFORTESTS" \
   || printf '%s' "$leaked" | grep -qF "curl"; then
   echo "FAIL unrecognised command leaked into the projection: $leaked"
   failures=$((failures + 1))
-elif printf '%s' "$leaked" | jq -e '.commands == [{"cmd":"other","compound":false,"has_subst":false,"n":1}]' >/dev/null; then
+elif printf '%s' "$leaked" | jq -e '.commands == [{"cmd":"other","compound":false,"n":1}]' >/dev/null; then
   echo "ok   unrecognised command reduces to \"other\""
 else
   echo "FAIL unrecognised command did not reduce to \"other\": $leaked"
