@@ -120,6 +120,13 @@ jobs:
       #
       # It guards a future break of the sparse-checkout, not a present one: a renamed path, a
       # pattern that stops matching in non-cone mode, a file moved without updating the checkout.
+      #
+      # It also fires on a rename done *correctly*, and that is not a bug to fix here. The pattern
+      # and the path come from the pull request; the tree they are matched against is `main`. So a
+      # PR that renames the script consistently still fails its own smoke job, because main has
+      # only the old path to hand the checkout. Landing a rename is two merges: add the file at the
+      # new path, then switch the pattern and the `run:` over. The prompt document has always
+      # carried the same constraint through `cat`.
       - name: Verify the context step's preconditions
         if: github.event.pull_request.user.login != 'dependabot[bot]'
         run: |
@@ -144,18 +151,23 @@ jobs:
       - name: Gather review context
         if: github.event.pull_request.user.login != 'dependabot[bot]'
         id: context
-        # Nine API reads feed the prompt now. A failure in this step *skips* the review
-        # step, and with it the notify step's failure check, so the PR would get no review
-        # and no explanation. Every command below is guarded individually; this is the
-        # backstop that keeps a bug in one block from costing the PR its review.
+        # Nine API reads feed the prompt. Every command in the script is guarded individually,
+        # so one failing read costs its own block and nothing else -- that is what keeps a bug
+        # in one block from costing the PR its review.
         #
-        # What it costs when it fires: pr_context is appended to $GITHUB_OUTPUT once, at the
-        # end, so an abort anywhere before that leaves the output unset and the prompt gets
-        # an *empty* <pr_context> -- not a partial one. review_cycle and threads are written
-        # earlier and survive. Each degraded block carries a sentence saying what is
-        # missing, but a degraded step carries nothing, so the prompt tells the reviewer to
-        # fetch what it needs itself when the block is empty. Without that line the prompt
-        # would be telling it not to re-fetch context it never received.
+        # continue-on-error is no longer a way to salvage the review, though, and the two are
+        # easy to confuse. A non-zero exit from the *step* now skips the review outright: the
+        # review step requires steps.context.outcome == 'success'. It stays continue-on-error so
+        # the job reaches the notify step, which announces the skip; without that the failure
+        # would be a green run with no review and no comment. So the trade is a stated absence
+        # instead of a review built on nothing.
+        #
+        # Why not let it through: pr_context is appended to $GITHUB_OUTPUT once, at the end, so
+        # an abort anywhere before that leaves it unset entirely rather than partial, while
+        # review_cycle and threads were written earlier and survive. A degraded *block* carries
+        # a sentence saying what is missing; a degraded *step* carries nothing, and the surviving
+        # outputs then assert a clean cycle 1 that never happened. The prompt's "fetch it
+        # yourself if the block is empty" line still covers the per-block case.
         continue-on-error: true
         # The work is a script rather than an inline block because Actions parses a `run:` block
         # as one template expression and refuses any over 21,000 characters. Inline, this one was
@@ -178,9 +190,10 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
 
-      # The only step a dry run skips, and the only one it needs to: every step after this one
-      # is already gated on this step's outcome or its outputs, so skipping it silences the whole
-      # write side of the workflow without a second condition anywhere.
+      # The only step a dry run skips by design. Two of the three steps after it are already gated
+      # on its outcome or its outputs, so skipping it silences them for free; the notify step needs
+      # its own condition, because it can also fire on a context failure and would otherwise
+      # comment during a smoke run.
       #
       #   Reduce execution log  -- needs steps.review.outputs.execution_file, empty when skipped
       #   Upload tool usage     -- needs steps.tool-usage.outcome == 'success', which is 'skipped'

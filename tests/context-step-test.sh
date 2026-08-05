@@ -562,14 +562,19 @@ ENDPOINTS
 # written `${PR_NUMBER:?}`, which fires on empty as well as unset, so the whole script exited on
 # line 26 of every main-push smoke run -- the run stayed green because the step is
 # continue-on-error, and the smoke test silently stopped covering anything past that line.
-# The reads are expected to degrade here; what matters is that the script gets to them.
+# What this proves is narrow and worth stating exactly: the guard does not fire and the script
+# runs to the end. The reads do not degrade under the stub -- an empty number still produces
+# `repos/.../pulls//reviews` and `gh pr diff ""`, which match the stub's patterns as happily as a
+# real number does, so the context comes out fully populated. Against the real gh an empty
+# selector resolves the PR from the current branch, and on a push to main there is no such PR, so
+# the reads degrade into their guarded sentences there. Either way the script reaches them.
 PR_NUMBER='' run_step "no pull request number" > "$WORK/code.txt"
 expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when there is no pull request number"
 if grep -q "must set PR_NUMBER" "$WORK/step.out"; then
   echo "FAIL an empty PR_NUMBER aborts the script; a main-push smoke run covers nothing"
   failures=$((failures + 1))
 else
-  echo "ok   an empty PR_NUMBER degrades the reads instead of aborting the script"
+  echo "ok   an empty PR_NUMBER runs the script to the end instead of tripping the guard"
 fi
 
 if [ "$failures" -ne 0 ]; then

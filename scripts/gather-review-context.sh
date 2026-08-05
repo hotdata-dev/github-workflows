@@ -191,14 +191,9 @@ DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
 
 # Title and body reach the shell through env, never an Actions expression
 # interpolation: both are attacker-controlled text and would otherwise be spliced
-# into this script.
+# into this script. (The header explains why no interpolation can reach this file at
+# all now; tests/context-step-test.sh still rejects the delimiter anywhere in it.)
 #
-# That expression syntax cannot be written out inside this run block, not even in a
-# comment. Actions parses those delimiters in the block's *string value*, comments
-# included, and an empty pair is a syntax error that makes the whole workflow
-# unparseable -- no jobs, no required check, every PR in the org blocked behind
-# "Please close and reopen the PR to trigger this workflow". A YAML comment outside
-# a block scalar is safe, because the YAML parser strips it before Actions looks.
 # First in the file on purpose: the byte cap keeps the head, so anything the
 # reviewer must not miss has to be above the blocks that can grow.
 if [ -s "$WARN_FILE" ]; then
