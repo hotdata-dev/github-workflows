@@ -54,3 +54,41 @@ jobs:
 
       - name: Context step end to end
         run: tests/context-step-test.sh
+
+  # Runs claude-pr-review.yml itself, from this commit, with the review step skipped. The checks
+  # above all read the workflow as text; this one hands it to Actions and asks whether it starts.
+  #
+  # That is the gap the last two outages went through. An org ruleset injects the review workflow
+  # into every repo resolved from `main`, so the review on a pull request here comes from main's
+  # copy -- never from the copy the pull request is changing. Both times, a file Actions refuses
+  # to parse merged with this suite green, and the org lost reviews until someone noticed: an
+  # empty expression delimiter inside a shell comment, then a `run:` block over the
+  # 21,000-character expression limit. Neither is visible to yaml.safe_load, to bash, or to
+  # actionlint, and enumerating the next limit ahead of time is a game with no end. Executing the
+  # file has no such gap -- if Actions will not load it, this job cannot start, and CI is red.
+  #
+  # `uses: ./` resolves from the calling commit rather than from the default branch, which is what
+  # makes this the pull request's copy and not main's.
+  smoke:
+    name: Review workflow starts
+    # The same set the called job declares. A caller cannot grant a reusable workflow more than
+    # it holds, and the point of this job is to exercise the real thing: the nine context reads
+    # each need their permission, and a missing one degrades silently into a "could not read"
+    # sentence rather than failing. pull-requests: write is unused on this path -- the only two
+    # steps that write are skipped with the review step -- but it is what production runs with,
+    # and a smoke test that runs with a different token is testing a different workflow.
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+      actions: read
+      issues: read
+      checks: read
+      statuses: read
+    uses: ./.github/workflows/claude-pr-review.yml
+    with:
+      dry_run: true
+    # The GitHub App private key, for the token step and the cross-repo prompt checkout. Both run
+    # in a dry run, so a broken sparse-checkout or an expired key surfaces here rather than in the
+    # org.
+    secrets: inherit
