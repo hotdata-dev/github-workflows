@@ -292,15 +292,21 @@ jobs:
             '
           }
 
+          # Neutralise into the file, then cap -- never the other way round. These
+          # substitutions *grow* the text: a bare `::` line goes from 3 bytes to 28, so a cap
+          # enforced before them stops bounding the step output, and 100 KB of `::`-only
+          # comment lines would leave here as ~930 KB. Capping afterwards is safe in the only
+          # direction that matters, because head -c drops the tail and cannot re-expose a
+          # marker the prefix was covering.
           THREADS_FILE="${RUNNER_TEMP}/threads.md"
-          printf '%s\n' "$THREADS" > "$THREADS_FILE"
+          printf '%s\n' "$THREADS" | neutralise_untrusted > "$THREADS_FILE"
           cap_file "$THREADS_FILE" "$THREADS_MAX_BYTES" \
             "prior review comments truncated at ${THREADS_MAX_BYTES} bytes; read the rest with gh pr view"
 
           DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
           {
             echo "threads<<${DELIMITER}"
-            neutralise_untrusted < "$THREADS_FILE"
+            cat "$THREADS_FILE"
             echo "${DELIMITER}"
           } >> $GITHUB_OUTPUT
 
@@ -523,6 +529,11 @@ jobs:
           fi
           { echo; echo "## PR conversation"; printf '%s\n' "$CONVO"; } >> "$CTX"
 
+          # Before the size check, for the reason given at the threads file: the substitutions
+          # grow the text, so the budget has to be enforced on what actually leaves the step.
+          neutralise_untrusted < "$CTX" > "${CTX}.clean"
+          mv "${CTX}.clean" "$CTX"
+
           # Last resort against an unbounded block -- the per-block caps above should keep
           # the file far below this, so hitting it means one of them regressed.
           if [ "$(wc -c < "$CTX" | tr -d " ")" -gt "$CTX_MAX_BYTES" ]; then
@@ -533,7 +544,7 @@ jobs:
           CTX_DELIMITER="PR_CONTEXT_$(openssl rand -hex 16)"
           {
             echo "pr_context<<${CTX_DELIMITER}"
-            neutralise_untrusted < "$CTX"
+            cat "$CTX"
             echo "${CTX_DELIMITER}"
           } >> $GITHUB_OUTPUT
         env:

@@ -66,6 +66,12 @@ and restructuring them would misrepresent the file being reviewed — while a li
 visible `[log marker neutralised]` prefix, because there the whole line was the command. A mid-line
 `::` is left alone, which keeps every `std::collections::HashMap` in a Rust diff intact.
 
+Both substitutions run *before* the byte caps, not after. They are the only thing here that makes text
+longer — a bare `::` line is 3 bytes in and 28 out — so capping first would leave the budgets bounding
+nothing: 100 KB of `::`-only comment lines would leave as ~930 KB. Truncating afterwards is safe in
+the direction that matters, since `head -c` only drops the tail and cannot re-expose a marker the
+prefix was covering.
+
 ### Tool usage artifact
 
 Each run attaches a `claude-tool-usage-pr-<number>` artifact (14-day retention): tool call counts,

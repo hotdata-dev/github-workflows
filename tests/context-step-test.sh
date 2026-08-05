@@ -118,12 +118,16 @@ case "$args" in
   *"/pulls/"*"/comments"*)
     fail_if_marked comments
     if [ -n "$STUB_THREAD_BODY" ]; then
-      # One thread, body under the caller's control. The threads block is a separate step
+      # Threads whose body is under the caller's control. The threads block is a separate step
       # output from the context, and the production incident this exists for arrived through
       # it: the marker was prose in a prior review comment, not anything the PR author wrote.
-      jq -n --arg body "$STUB_THREAD_BODY" \
-        '[{id: 1, user: {login: "claude[bot]"}, path: "a.py", line: 1,
-           created_at: "2026-08-01T00:00:00Z", body: $body}]'
+      # The count matters as much as the body, because each body is capped at 3,000 characters
+      # on its own -- one comment cannot reach the block cap no matter what is in it, so a
+      # test that needs the block cap has to ask for many.
+      jq -n --arg body "$STUB_THREAD_BODY" --argjson n "${STUB_THREAD_COMMENTS:-1}" \
+        '[range(if $n > 0 then $n else 1 end)
+          | {id: ., user: {login: "claude[bot]"}, path: "a.py", line: (. + 1),
+             created_at: "2026-08-01T00:00:00Z", body: $body}]'
     elif [ "$STUB_THREAD_COMMENTS" -gt 0 ]; then
       awk -v n="$STUB_THREAD_COMMENTS" 'BEGIN {
         printf "[";
@@ -398,7 +402,7 @@ expect_no_markers "$THREADS_OUT" "workflow commands in a review comment are neut
 # for the block tags: that block exists to show the reviewer an error line, so deleting
 # `##[error]` would remove the thing it was fetched for.
 expect_context '## \[error\]this is not really an error' \
-  "a mid-line ##[ is broken by a space and stays readable"
+  "a line-leading ##[ is broken by a space rather than prefixed"
 expect_context '\[log marker neutralised\] ::error::neither is this' \
   "a line-leading :: is prefixed and stays readable"
 expect_context '`## \[error\]` marker' "a ##[ inside backticks is broken too"
@@ -626,6 +630,35 @@ expect "$(awk -v n="$threads_bytes" 'BEGIN { print (n < 300000) ? "bounded" : "u
 expect "$(awk -v n="$total_bytes" 'BEGIN { print (n < 400000) ? "bounded" : "unbounded" }')" \
   "bounded" "the whole step output is bounded (was $total_bytes bytes)"
 expect_context '^## Full diff' "the diff block survives a huge threads block"
+
+# The budget has to survive the sanitiser, which is the one thing in this step that makes the
+# text *longer*. A bare `::` line is 3 bytes in and 28 out, so a cap enforced before the
+# substitution bounds nothing: 100 KB of `::`-only lines leaves as ~930 KB. The padding used
+# above carries no marker, so only an input made of them holds this ordering in place, and it
+# needs no privilege to produce -- a review comment, or a committed file of `::` lines.
+#
+# 400 comments, not one: each body is capped at 3,000 characters before it reaches the block,
+# so a single comment cannot approach the block cap however long it is. Getting that wrong is
+# what made the first version of this test pass against the bug it was written for.
+COLON_BODY=$(awk 'BEGIN { for (i = 0; i < 2000; i++) print "::" }')
+STUB_THREAD_BODY="$COLON_BODY" STUB_THREAD_COMMENTS=400 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on comments made of bare :: lines"
+colon_bytes=$(wc -c < "$THREADS_OUT" | tr -d ' ')
+expect "$(awk -v n="$colon_bytes" 'BEGIN { print (n < 300000) ? "bounded" : "unbounded" }')" \
+  "bounded" "the sanitiser cannot grow the threads output past its cap (was $colon_bytes bytes)"
+expect_no_markers "$THREADS_OUT" "every :: line in an amplifying comment is still neutralised"
+unset STUB_THREAD_BODY
+
+# The same amplification against the context, through the one block with no per-block cap of
+# its own: the PR body is printed whole. GitHub allows 65,536 characters there, which is
+# ~21,800 `::` lines, or ~610 KB out against a 200 KB budget.
+BODY_COLONS=$(awk 'BEGIN { for (i = 0; i < 21800; i++) print "::" }')
+PR_BODY="$BODY_COLONS" run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a PR body of bare :: lines"
+ctx_colon_bytes=$(wc -c < "$CTX_FILE" | tr -d ' ')
+expect "$(awk -v n="$ctx_colon_bytes" 'BEGIN { print (n < 250000) ? "bounded" : "unbounded" }')" \
+  "bounded" "the sanitiser cannot grow the context past its cap (was $ctx_colon_bytes bytes)"
+expect_no_markers "$CTX_FILE" "every :: line in an amplifying PR body is still neutralised"
 
 # Ordering only means something if an *earlier* block can exhaust the budget. LOG_WINDOW
 # counts lines, and a CI log line has no length limit -- one base64 or JSON dump near the
