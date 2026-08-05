@@ -139,14 +139,6 @@ jobs:
           # in a week was 3,448, so 3,000 patch lines covers the corpus; the cap exists so
           # one generated-file PR cannot blow up the prompt.
           DIFF_MAX=3000
-          # negative test padding, reverted in the next commit. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-          # negative test padding, reverted in the next commit. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-          # negative test padding, reverted in the next commit. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-          # negative test padding, reverted in the next commit. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-          # negative test padding, reverted in the next commit. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-          # negative test padding, reverted in the next commit. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-          # negative test padding, reverted in the next commit. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-          # negative test padding, reverted in the next commit. xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
           SINCE_MAX=2000
           LOG_WINDOW=120
           # Byte budgets, split across the step's two outputs rather than applied to one of
