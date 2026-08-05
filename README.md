@@ -60,10 +60,19 @@ markers inside a fetched log are mid-line and were never commands.
 ### Tool usage artifact
 
 Each run attaches a `claude-tool-usage-pr-<number>` artifact (14-day retention): tool call counts,
-Bash command labels with a compound flag, the denied subset of both, and the run's turn count and
-cost. It exists to diagnose permission denials against the workflow's `--allowedTools` list, since
-the job log records only the number of denials, never what was refused. Tool names alone proved
-insufficient — 520 of 567 denials in the first week were `Bash`, which is every command there is.
+Bash command labels with `compound` and `has_subst` flags, the denied subset of both, and the run's
+turn count and cost. It exists to diagnose permission denials against the workflow's `--allowedTools`
+list, since the job log records only the number of denials, never what was refused. Tool names alone
+proved insufficient — 520 of 567 denials in the first week were `Bash`, which is every command there
+is.
+
+`has_subst` exists for what the frontloaded context left behind. Denials fell from 5.2 per run to
+0.3, and the remainder moved from reads to the *write* path: 4 of the first 16 runs were refused on
+`gh pr review` or `gh pr comment`, both allowlisted, one of them three times before the review
+landed. The hypothesis is the review body rather than the command — a body is markdown, and a
+backtick inside a double-quoted argument is command substitution to anything parsing shell — so the
+flag is tested against the raw command, where `compound` is tested with quoted spans removed. It is
+carried on `commands` as well as `denied_commands`, because a denial rate needs a base rate.
 
 The artifact is a projection of the action's execution log, never the log itself — that file is the
 full conversation, and the runner holds a git credential the reviewer can read, which artifacts
