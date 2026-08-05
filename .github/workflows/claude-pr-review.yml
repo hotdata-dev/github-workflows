@@ -168,13 +168,24 @@ jobs:
       #
       #   Reduce execution log  -- needs steps.review.outputs.execution_file, empty when skipped
       #   Upload tool usage     -- needs steps.tool-usage.outcome == 'success', which is 'skipped'
-      #   Notify on failure     -- needs outcome 'failure' or 'cancelled', and this is 'skipped'
+      #   Notify on failure     -- carries its own !inputs.dry_run, because it can now also fire
+      #                            on a context failure rather than only on a review failure
       #
       # So a smoke run posts no review, no comment and no artifact. Everything before this step
       # still runs against the live API: the app token, the cross-repo prompt checkout, and the
       # nine context reads with the job's real permissions.
+      #
+      # steps.context.outcome, because the context step is continue-on-error and therefore fails
+      # green. Anything that stops the script running -- a checkout that does not deliver it, a
+      # renamed path, a sparse pattern that stops matching -- leaves pr_context, threads and
+      # review_cycle unset, and an empty context is not a neutral one: a blank REVIEW CYCLE and an
+      # empty prior-comments block read as cycle 1 with nothing raised before. That is a false
+      # statement to the model, of exactly the kind the script's own guards exist to prevent, and
+      # it would reach every consumer repo at once. No context, no review.
       - uses: anthropics/claude-code-action@v1
-        if: github.event.pull_request.user.login != 'dependabot[bot]' && !inputs.dry_run
+        if: >-
+          github.event.pull_request.user.login != 'dependabot[bot]' && !inputs.dry_run
+          && steps.context.outcome == 'success'
         id: review
         continue-on-error: true
         with:
@@ -267,8 +278,15 @@ jobs:
           # (~100 review runs/week org-wide); the question is days-old, not quarters.
           retention-days: 14
 
+      # Also on a context failure, which now skips the review rather than feeding it an empty
+      # context. Without this clause that path is the silent one: no review, no comment, green
+      # check -- the shape of failure this workflow keeps being bitten by. !inputs.dry_run because
+      # a smoke run reaches this step with the review skipped and must never write.
       - name: Notify on review failure
-        if: github.event.pull_request.user.login != 'dependabot[bot]' && (steps.review.outcome == 'failure' || steps.review.outcome == 'cancelled')
-        run: gh pr comment ${{ github.event.pull_request.number }} --body "Automated review unavailable (Claude step failed). Please review manually."
+        if: >-
+          github.event.pull_request.user.login != 'dependabot[bot]' && !inputs.dry_run
+          && (steps.review.outcome == 'failure' || steps.review.outcome == 'cancelled'
+              || steps.context.outcome == 'failure')
+        run: gh pr comment ${{ github.event.pull_request.number }} --body "Automated review unavailable (the review step failed, or the context it needs could not be gathered). Please review manually."
         env:
           GH_TOKEN: ${{ github.token }}

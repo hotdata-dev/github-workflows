@@ -162,6 +162,31 @@ check_permission "statusCheckRollup" statuses "the StatusContext half of the CI 
 check_permission "/compare/" contents "the since-last-review comparison"
 check_permission "/pulls/" pull-requests "the PR reads"
 
+# The context step is continue-on-error, so everything it can fail at -- a checkout that does not
+# deliver the script, a bad path, a rename that stops matching the sparse pattern -- leaves the run
+# green with pr_context, threads and review_cycle all unset. Ungated, the review step then runs on
+# that: a blank REVIEW CYCLE and an empty prior-comments block read as cycle 1 with nothing raised
+# before, which is a false statement rather than a missing one, and it reaches every consumer repo
+# at once. The script's own guards exist to stop exactly that claim, and they cannot help if the
+# script never ran. So the review must be gated on the context step having succeeded.
+# The condition is a folded block, so collect its continuation lines too: everything indented
+# past the `if:` key, up to the next key of the step.
+review_gate=$(awk '/^      - uses: anthropics\/claude-code-action/ { found = 1; next }
+                   found && /^        if:/ { print; in_if = 1; next }
+                   in_if && /^          / { print; next }
+                   in_if { exit }' "$WORKFLOW_FILE")
+if [ -z "$review_gate" ]; then
+  echo "FAIL could not find the review step's if: in $WORKFLOW_FILE; this check proves nothing"
+  failures=$((failures + 1))
+elif ! printf '%s\n' "$review_gate" | grep -q "steps\.context\.outcome == 'success'"; then
+  echo "FAIL the review step does not require the context step to have succeeded, so a failed"
+  echo "     context read sends the model an empty context that reads as a clean cycle 1:"
+  printf '%s\n' "$review_gate" | sed 's/^/       /'
+  failures=$((failures + 1))
+else
+  echo "ok   the review step runs only when the context step succeeded"
+fi
+
 # The table above forces a new API call in the context step to declare its permission on the
 # review job. That does nothing for the smoke job in tests.yml, which calls the review workflow
 # and has to grant the same set by hand: a caller cannot give a reusable workflow more than it
