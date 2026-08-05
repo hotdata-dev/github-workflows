@@ -36,9 +36,12 @@ extract_step() {
   ' "$WORKFLOW"
 }
 
+# Assembled rather than written literally: this file must not contain the delimiter either,
+# or the grep below finds itself when someone greps the test suite for it.
+EXPR_OPEN="\${$(printf '%s' '{')"
 extract_step \
-  | sed -e 's/\${{ github.event.pull_request.number }}/"$STUB_PR"/g' \
-        -e 's/\${{ github.repository }}/"$STUB_REPO"/g' \
+  | sed -e "s/${EXPR_OPEN} github.event.pull_request.number }}/\"\$STUB_PR\"/g" \
+        -e "s/${EXPR_OPEN} github.repository }}/\"\$STUB_REPO\"/g" \
   > "$WORK/step.sh"
 
 if [ "$(wc -l < "$WORK/step.sh")" -lt 100 ]; then
@@ -46,12 +49,18 @@ if [ "$(wc -l < "$WORK/step.sh")" -lt 100 ]; then
     "extraction no longer matches the workflow" >&2
   exit 1
 fi
-# Comments are allowed to discuss ${{ }}; code is not allowed to contain one this test
-# does not substitute, because an unsubstituted expression would run here as literal text
-# and hide whatever the real workflow splices in.
-if grep -vE '^[[:space:]]*#' "$WORK/step.sh" | grep -q '\${{'; then
-  echo "FAIL: the step gained a \${{ }} interpolation this test does not substitute:" >&2
-  grep -nE '\${{' "$WORK/step.sh" | grep -vE ':[[:space:]]*#' >&2
+# No Actions expression delimiter may survive anywhere in the extracted script -- not in
+# code, and not in a comment either. The comment exemption this check used to carry is what
+# shipped a broken workflow to every repo in the org: a shell comment reading "never a
+# ${OPEN} interpolation" parses as an *empty expression*, which Actions rejects outright, so
+# the workflow never started, no required check ever reported, and every PR in the org sat
+# behind "Please close and reopen the PR to trigger this workflow". bash does not care what
+# is in a comment; the Actions expression parser does.
+if grep -q "$EXPR_OPEN" "$WORK/step.sh"; then
+  echo "FAIL: an Actions expression delimiter survives in the extracted step script." >&2
+  echo "      Either this test needs to substitute it, or -- if it is inside a comment --" >&2
+  echo "      the comment has to stop spelling the delimiter out." >&2
+  grep -n "$EXPR_OPEN" "$WORK/step.sh" >&2
   exit 1
 fi
 
