@@ -163,6 +163,29 @@ else
   echo "skip actionlint not installed; only the expression scan ran"
 fi
 
+# The prompt document reaches the model through steps.prompt.outputs.content, which is the one
+# path into the prompt that `neutralise_untrusted` never touches -- it runs over the two
+# context step outputs only. So a workflow command written *here* is not conditional on what
+# an author does: it annotates the review's own check run on every run in the org, for as long
+# as the line is on main. This file documents the sanitiser, so it necessarily talks about the
+# markers, and one draft of that paragraph shipped a live `##[error]` for exactly that reason.
+#
+# Only the parsable spellings count. `##[` with no closing bracket on the line is inert (there
+# is nothing to close the command), and `## [error]` is the already-spaced form -- both appear
+# in the paragraph on purpose, and the contrast is the point of it.
+PROMPT_DOC=docs/claude-pr-review-prompt.md
+if [ ! -f "$PROMPT_DOC" ]; then
+  echo "FAIL $PROMPT_DOC is missing, so the marker scan proves nothing"
+  failures=$((failures + 1))
+elif found=$(grep -nE '##\[[A-Za-z][^]]*\]|^[[:space:]]*::' "$PROMPT_DOC"); then
+  echo "FAIL $PROMPT_DOC contains a parsable Actions workflow command. It is injected into"
+  echo "     the prompt unsanitised, so this annotates every review run in the org:"
+  printf '%s\n' "$found" | sed 's/^/       /'
+  failures=$((failures + 1))
+else
+  echo "ok   the prompt document carries no parsable workflow command"
+fi
+
 if [ "$failures" -ne 0 ]; then
   echo "$failures test(s) failed"
   exit 1

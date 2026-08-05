@@ -319,11 +319,17 @@ expect_context '^\+incremental change$' "since-last-review diff carries its body
 # this is the assertion that catches it -- the body here is a command substitution and a
 # ${{ }} expression, and both must survive as characters.
 expect_context '\$\(touch /tmp/pwned\)' "PR body interpolates as literal text, not shell"
-# The whole default, not a prefix of it. This is the assertion that would have caught the
-# `}}` truncation in run_step's default: the Actions expression sits after the point where the
-# parameter expansion used to end, so its arrival proves the body reached the step intact.
-expect_context 'are literal text here\.$' "the whole PR body reaches the context, not a prefix"
-expect_context 'github\.token' "an Actions expression in the PR body survives as text"
+# The whole default, including the `}}` that the old inline form ate. `${PR_BODY-...}` ended at
+# the first `}` of `${{ github.token }}`, and the tail after it stayed inside the outer quotes
+# and was concatenated literally -- so a bare `github.token` match survived the bug, and only
+# the doubled brace distinguishes the fragment from the whole. Pinning it is what makes this
+# assertion about body integrity rather than about one substring surviving.
+#
+# The old form did also end `here.}` rather than `here.`, because the default's final `}` was
+# literal once the expansion had closed early, so an end-anchored match caught it too. This
+# spelling does not depend on that second-order effect.
+expect_context 'github\.token \}\} are literal text here\.$' \
+  "the whole PR body reaches the context, not a prefix"
 expect "$([ -e /tmp/pwned ] && echo leaked || echo safe)" "safe" \
   "command substitution in the PR body did not execute"
 

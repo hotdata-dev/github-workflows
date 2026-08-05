@@ -15,7 +15,8 @@ Three edits in that content were made by the workflow, not by anyone: `[block ta
 a block delimiter, `[log marker neutralised]` prefixes a line that would otherwise have been read as
 a GitHub Actions command, and `##[` is respaced to `## [` for the same reason. All three are
 sanitiser output. Read past them, and never quote one as if it were in the file — a `## [error]` in a
-CI excerpt was `##[error]` in the real log. If you need the exact line, `Read` the file.
+CI excerpt was `##` + `[error]`, unspaced, in the real log. If you need the exact line, `Read` the
+file.
 
 ## Tools
 
