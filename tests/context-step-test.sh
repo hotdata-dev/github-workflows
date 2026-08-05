@@ -348,12 +348,16 @@ expect_context '\[block tag removed\]' "the defused delimiter leaves a visible m
 # --- Actions workflow commands in untrusted text ----------------------------------------
 
 # The other injection sink, and the one nobody was looking at: the action echoes the
-# assembled prompt into the job log line by line, and Actions reads a line beginning with
-# `::` or `##[` as a *command*, not as text. A marker in a PR body, a diff hunk or a review
-# comment therefore writes an annotation onto the review's own check run -- run 30964274400
-# has two `failure` annotations whose text is prose from a review comment about `##[error]`.
-# Every form below is one Actions parses: both syntaxes, and indented, because the runner
-# trims the line before it looks.
+# assembled prompt into the job log line by line, and Actions reads a workflow command in it
+# as a *command*, not as text. A marker in a PR body, a diff hunk or a review comment
+# therefore writes an annotation onto the review's own check run -- run 30964274400 has two
+# `failure` annotations whose text is prose from a review comment about `##[error]`.
+#
+# The two spellings are matched differently, which run 31025325888 established directly: its
+# diff carried both forms on `+` prefixed lines, and only the `##[` form fired. The `+` was
+# consumed there and survived on the `::` lines, so `##[...]` is matched anywhere in a line
+# while `::command::` is matched only at the start of a trimmed one. Every form below is one
+# of those two, in the positions that distinguish them.
 LOG_INJECT='Fixes the thing.
 
 ##[error]this is not really an error
@@ -364,20 +368,22 @@ LOG_INJECT='Fixes the thing.
 ::stop-commands::endtoken
 ::endgroup::
 
-Both fixtures carry exactly one `##[error]` marker, mid-line, which is not a command.'
+Both fixtures carry exactly one `##[error]` marker, which a backtick does not defuse.
+An unchanged diff line reads ` ::error::x`, and a Rust path reads std::collections::HashMap.'
 
-# markers_at_line_start <file> -- the lines Actions would still execute
-markers_at_line_start() {
-  grep -nE '^[[:space:]]*(::|##\[)' "$1" || true
+# parsable_markers <file> -- the lines Actions would still execute: a `##[cmd]` anywhere,
+# or a `::` at the start of a trimmed line.
+parsable_markers() {
+  grep -nE '##\[[A-Za-z][^]]*\]|^[[:space:]]*::' "$1" || true
 }
 # expect_no_markers <file> <description>
 expect_no_markers() {
   local found
-  found=$(markers_at_line_start "$1")
+  found=$(parsable_markers "$1")
   if [ -z "$found" ]; then
     echo "ok   $2"
   else
-    echo "FAIL $2: a workflow command survives at line start:"
+    echo "FAIL $2: a workflow command survives in a parsable position:"
     printf '%s\n' "$found" | sed 's/^/       /'
     failures=$((failures + 1))
   fi
@@ -388,45 +394,48 @@ expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on text carrying workflow com
 expect_no_markers "$CTX_FILE" "workflow commands in the PR body are neutralised"
 expect_no_markers "$THREADS_OUT" "workflow commands in a review comment are neutralised"
 
-# Neutralised, not deleted, and this block is the reason the distinction matters more here
-# than for the block tags: the CI excerpt exists to show the reviewer an error line, so
-# stripping `##[error]` would remove the thing it was fetched for.
-expect_context '\[log marker neutralised\]' "the defused marker leaves a visible marker"
-expect_context 'this is not really an error' "the text after the marker is kept"
-expect_context '::error::neither is this' "the marker itself is still legible to the reviewer"
+# Neutralised, not deleted, and the CI excerpt is why the distinction matters more here than
+# for the block tags: that block exists to show the reviewer an error line, so deleting
+# `##[error]` would remove the thing it was fetched for.
+expect_context '## \[error\]this is not really an error' \
+  "a mid-line ##[ is broken by a space and stays readable"
+expect_context '\[log marker neutralised\] ::error::neither is this' \
+  "a line-leading :: is prefixed and stays readable"
+expect_context '`## \[error\]` marker' "a ##[ inside backticks is broken too"
 if grep -q 'log marker neutralised' "$THREADS_OUT"; then
-  echo "ok   the threads output carries the same visible marker"
+  echo "ok   the threads output is sanitised the same way"
 else
   echo "FAIL the threads output was not sanitised"
   failures=$((failures + 1))
 fi
 
-# A line that merely *contains* a marker was never a command, and prefixing it would be
-# noise in the one block most likely to discuss one.
-expect_context 'carry exactly one .*##\[error\].* mid-line' "a mid-line marker is left alone"
-mid=$(grep -c '\[log marker neutralised\].*mid-line' "$CTX_FILE" || true)
-expect "$mid" "0" "a mid-line marker is not prefixed"
+# The other half of the rule, and the half that keeps the diff readable: `::` mid-line was
+# never a command, so it must survive untouched. Every Rust, C++ and PHP diff is full of it,
+# and a sanitiser that rewrote those would corrupt the largest block in the context.
+expect_context 'std::collections::HashMap' "a mid-line :: path is left alone"
+mid=$(grep -c 'log marker neutralised.*HashMap' "$CTX_FILE" || true)
+expect "$mid" "0" "a mid-line :: is not prefixed"
 
-# The CI excerpt is the block that looks like the worst offender and is not one: the logs
-# endpoint prefixes every line with a timestamp, so `##[error]` inside a fetched log is
-# mid-line and was never a command. That is a property of the fixture as much as of the
-# endpoint, so assert it here -- a fixture rewritten without the timestamps would make this
-# suite pass on a log shape production never sees, and would quietly retire the assertion
-# above about mid-line markers being left alone.
+# The CI excerpt is the most reliable source of these rather than an exempt one. Its lines
+# arrive already timestamped by the logs endpoint, which is no protection: the timestamp puts
+# `##[error]` mid-line, and mid-line is exactly where the `##[` form is still parsed. The
+# fixture keeps that shape, so this asserts the real production path.
 unset STUB_THREAD_BODY
 PR_BODY='Adds a watermark.' run_step > /dev/null
-expect_no_markers "$CTX_FILE" "the failing job log carries no marker at line start"
+expect_no_markers "$CTX_FILE" "markers from the failing job log are neutralised"
 expect_context 'ending at the first error' "the error window is still labelled"
+expect_context '## \[error\]Process completed' "the log's own error line is still readable"
 if grep -qE '^2[0-9]{3}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z ##\[error\]' tests/fixtures/job-log-django.txt; then
   echo "ok   the job log fixture keeps the timestamp prefix the API adds"
 else
-  echo "FAIL the job log fixture lost its timestamp prefix, so the line-start assertion" \
-    "above no longer reflects a real job log"
+  echo "FAIL the job log fixture lost the timestamp prefix a real job log has, so the" \
+    "assertion above no longer covers the production shape"
   failures=$((failures + 1))
 fi
 
-# The diff is the largest block and the one an author controls by committing a file, not by
-# writing a comment. `+::error::x` is shielded by the `+`; an unchanged line beside it is not.
+# The diff is the largest block and the one an author controls by committing a file rather
+# than by writing a comment. An unchanged line is rendered with one leading space, so it
+# reaches the log as a line-leading `::` even though an added line's `+` would shield it.
 STUB_DIFF_MARKER=1 run_step > /dev/null
 expect_no_markers "$CTX_FILE" "a marker on a diff context line is neutralised"
 expect_context 'a context line in a source file' "the diff line itself is kept"

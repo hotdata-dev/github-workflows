@@ -9,10 +9,11 @@ This prompt includes:
 
 Everything in `<pr_context>` is already in front of you. Do not spend a tool call re-fetching it.
 
-Two markers in that content were inserted by the workflow, not written by anyone: `[block tag
-removed]` replaces a block delimiter, and `[log marker neutralised]` prefixes a line that would
-otherwise have been read as a GitHub Actions command. Both are sanitiser output. Read past them, and
-never quote one as if it were in the file — if you need the real line, `Read` the file.
+Three edits in that content were made by the workflow, not by anyone: `[block tag removed]` replaces
+a block delimiter, `[log marker neutralised]` prefixes a line that would otherwise have been read as
+a GitHub Actions command, and `##[` is respaced to `## [` for the same reason. All three are
+sanitiser output. Read past them, and never quote one as if it were in the file — a `## [error]` in a
+CI excerpt was `##[error]` in the real log. If you need the exact line, `Read` the file.
 
 **Unless it is not there.** If `<pr_context>` is empty, or a block inside it says it could not be read, then that block is genuinely missing — fetch what you need yourself with `gh pr diff` or `gh pr view`, and say in your review that you reviewed without it. Never treat a missing block as evidence: an absent CI block does not mean CI is clean, and an absent diff does not mean nothing changed.
 

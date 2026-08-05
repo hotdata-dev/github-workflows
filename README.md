@@ -49,13 +49,22 @@ block delimiters are neutralised by shape rather than by exact string: `</pr_con
 them would otherwise end the data block early and land the rest where it reads as instructions.
 
 The same text gets a second treatment for a different sink. The action echoes the assembled prompt
-into the job log line by line, and GitHub reads a log line starting with `::` or `##[` as a *workflow
-command* — so a marker in a PR body, a review comment, or a diff context line writes an annotation
-onto the review's own check run. One run carried two `failure` annotations whose text was prose from
-a review comment discussing `##[error]`. Such a line is prefixed rather than stripped: the parser
-only looks at the start of a line, and the marker stays legible for a reviewer reading text that is
-*about* an error. The CI excerpt is exempt by accident — the logs endpoint timestamps every line, so
-markers inside a fetched log are mid-line and were never commands.
+into the job log line by line, and GitHub reads a workflow command in that log as a *command* — so a
+marker in a PR body, a diff hunk, a CI excerpt, or a review comment writes an annotation onto the
+review's own check run. One run carried two `failure` annotations whose text was prose from a review
+comment discussing `##[error]`.
+
+The two spellings are not parsed alike, and one review settled which is which: its diff carried both
+forms on `+` prefixed lines, the `+` was consumed on `##[error]` and survived on `::error::`, and all
+seven annotations were the former. So `::command::` is matched only at the start of a trimmed line,
+while `##[...]` is matched anywhere in one — a leading `+`, a timestamp, or a markdown backtick
+defuses nothing. That makes the CI excerpt the most reliable source of these rather than an exempt
+one, since it fetches the window around `##[error]` from an already-timestamped log.
+
+So `##[` is broken by a single space wherever it appears — those lines are usually source or log text
+and restructuring them would misrepresent the file being reviewed — while a line-leading `::` gets a
+visible `[log marker neutralised]` prefix, because there the whole line was the command. A mid-line
+`::` is left alone, which keeps every `std::collections::HashMap` in a Rust diff intact.
 
 ### Tool usage artifact
 

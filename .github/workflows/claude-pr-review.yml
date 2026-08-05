@@ -264,21 +264,31 @@ jobs:
           # `##[error]`; the run still concluded success, so what this costs is a red mark on
           # a green check, not a broken review.
           #
-          # Which blocks can carry one is decided by whether the text arrives with a line
-          # prefix. The CI excerpt cannot: `/actions/jobs/{id}/logs` prefixes every line with
-          # a timestamp, so a marker inside a fetched log is mid-line and was never a command
-          # (tests/fixtures/job-log-django.txt keeps that shape deliberately). The blocks that
-          # can are the ones quoting text verbatim -- PR title and body, review comments, the
-          # PR conversation, and the diff, where an unchanged context line is rendered with a
-          # single leading space and the runner trims before it parses.
+          # The two spellings are not parsed the same way, and the difference decides the fix.
+          # Run 31025325888 settles it -- one review whose diff carried both forms on `+`
+          # prefixed lines:
           #
-          # Prefixing the line is the whole fix -- the parser only looks at the start of one
-          # -- and it keeps the marker visible, which matters when the text the reviewer is
-          # reading is *about* an error line.
+          #   `+##[error]this is not really an error`  -> the `+` was consumed, annotation fired
+          #   `+::error::neither is this`              -> the `+` survived, nothing fired
+          #
+          # So `::command::` is matched only at the start of a trimmed line, while `##[...]`
+          # is matched *anywhere in the line*. Every one of that run's seven annotations was a
+          # `##[error]` and none was a `::`. A leading `+`, a timestamp, or a markdown backtick
+          # is therefore no protection at all for the `##[` form -- which is why the CI excerpt
+          # is the most reliable source of these, not an exempt one: it fetches the window
+          # around `##[error]` from a log whose every line the API has already timestamped.
+          #
+          # Hence two rules. `##[` is broken wherever it appears, by one space, because the
+          # lines carrying it are usually source or log text and restructuring them would
+          # misrepresent the file the reviewer is reading. A line-leading `::` gets the visible
+          # marker instead: there the whole line was the command, so there is no file content
+          # to preserve. Both keep the text legible, which matters because the reviewer is
+          # often reading an excerpt that is *about* an error line.
           neutralise_untrusted() {
             perl -pe '
               s{< \s* /? \s* (?: pr_context | prior_review_comments ) [^>]* >}{[block tag removed]}gix;
-              s{^ (\s*) (?= :: | \#\# \[ )}{${1}[log marker neutralised] }x;
+              s{\#\# (?= \[ [A-Za-z] [^\]]* \] )}{## }gx;
+              s{^ (\s*) (?= :: )}{${1}[log marker neutralised] }x;
             '
           }
 
