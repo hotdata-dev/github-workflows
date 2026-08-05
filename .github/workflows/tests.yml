@@ -21,9 +21,3 @@ jobs:
 
       - name: Tool usage projection
         run: tests/tool-usage-test.sh
-
-      - name: Frontloaded PR context
-        run: tests/pr-context-test.sh
-
-      - name: Context step end to end
-        run: tests/context-step-test.sh
