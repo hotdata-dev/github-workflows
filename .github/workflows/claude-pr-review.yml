@@ -17,13 +17,26 @@ jobs:
       contents: read
       pull-requests: write
       id-token: write
-      # actions: read for the failing-job log excerpts, issues: read for the PR
-      # conversation (/issues/{n}/comments is the PR's own comment thread). The job
-      # declares permissions explicitly, so anything not listed here is `none` and both
-      # reads 403 -- silently, into "(log unavailable)" and "Could not read PR
-      # conversation comments.", since every block in the context step is guarded.
+      # One line per extra read the context step makes. The job declares permissions
+      # explicitly, so anything not listed here is `none` and the read fails -- quietly, into
+      # that block's "could not read" sentence, because every block is guarded.
+      #
+      # actions: read   -- the failing-job log excerpts (/actions/jobs/{id}/logs)
+      # issues: read    -- the PR conversation (/issues/{n}/comments is the PR's own thread)
+      # checks: read    -- the CheckRun half of statusCheckRollup
+      # statuses: read  -- the StatusContext half of it (Aikido, Terraform Cloud, anything
+      #                    posting a commit status rather than a check run)
+      #
+      # checks and statuses were both missing on the first production run, and the shape of
+      # that failure is worth remembering: `gh pr view --json statusCheckRollup` resolves one
+      # GraphQL field needing both, so it fails the whole rollup with "Resource not accessible
+      # by integration" rather than omitting the half it may not read. The CI block -- the
+      # reason this step exists -- rendered "Could not read check status." on a PR with 12
+      # checks. A personal access token cannot reproduce it, because it has every scope.
       actions: read
       issues: read
+      checks: read
+      statuses: read
     steps:
       - uses: actions/checkout@v6.0.2
         with:
