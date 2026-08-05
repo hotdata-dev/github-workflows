@@ -162,6 +162,19 @@ check_permission "statusCheckRollup" statuses "the StatusContext half of the CI 
 check_permission "/compare/" contents "the since-last-review comparison"
 check_permission "/pulls/" pull-requests "the PR reads"
 
+# A missing context script has to fail loudly somewhere, and it cannot be the context step: that
+# one is continue-on-error, so `bash <missing file>` exits 127 into a green run. The prompt
+# document gets this for free -- `cat` on a missing file fails its step -- and the script needs an
+# explicit check to match. It must sit in a step without continue-on-error, or it proves nothing.
+if ! grep -q "gather-review-context.sh is missing\|! -f \"\$script\"" "$WORKFLOW_FILE"; then
+  echo "FAIL nothing in $WORKFLOW_FILE checks that the context script arrived from the"
+  echo "     cross-repo checkout. A bad sparse-checkout pattern would exit 127 inside a"
+  echo "     continue-on-error step and leave the run green with an empty context."
+  failures=$((failures + 1))
+else
+  echo "ok   a missing context script fails the job rather than emptying the context"
+fi
+
 # The context step is continue-on-error, so everything it can fail at -- a checkout that does not
 # deliver the script, a bad path, a rename that stops matching the sparse pattern -- leaves the run
 # green with pr_context, threads and review_cycle all unset. Ungated, the review step then runs on

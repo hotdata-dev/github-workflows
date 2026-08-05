@@ -111,9 +111,25 @@ jobs:
           echo "$PROMPT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Verify jq is available
+      # Both preconditions for the context step, checked here because this step has no
+      # continue-on-error and that step does. A missing script is otherwise the quietest failure
+      # this workflow has: exit 127 swallowed into a green run, an empty context, and -- before
+      # the review step was gated on the context outcome -- a review that read an absent history
+      # as a clean first cycle. The prompt document has always had this protection, because
+      # `cat` on a missing file fails the job; the script needs it spelled out.
+      #
+      # It guards a future break of the sparse-checkout, not a present one: a renamed path, a
+      # pattern that stops matching in non-cone mode, a file moved without updating the checkout.
+      - name: Verify the context step's preconditions
         if: github.event.pull_request.user.login != 'dependabot[bot]'
-        run: jq --version
+        run: |
+          jq --version
+          script=.github-workflows/scripts/gather-review-context.sh
+          if [ ! -f "$script" ]; then
+            echo "$script is missing from the cross-repo checkout." >&2
+            echo "Check the sparse-checkout patterns against the paths in hotdata-dev/github-workflows@main." >&2
+            exit 1
+          fi
 
       # Frontloads what a week of tool-usage artifacts showed the reviewer fetching for
       # itself, one denied command at a time. Over 109 runs it averaged 19.5 Bash calls and

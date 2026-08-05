@@ -196,7 +196,7 @@ run_step() {
     RUNNER_TEMP="$WORK/rt" \
     GITHUB_OUTPUT="$WORK/out.txt" \
     STUB_FIXTURES="$PWD/tests/fixtures" \
-    PR_NUMBER=172 \
+    PR_NUMBER="${PR_NUMBER-172}" \
     REPO=hotdata-dev/dlthubworker \
     STUB_JOB_LOG="${STUB_JOB_LOG:-job-log-django.txt}" \
     GH_VERSION="${GH_VERSION:-2.96}" \
@@ -556,6 +556,21 @@ job_logs|(log unavailable)
 reviews|prior reviews could not be read
 comments|prior inline review comments could not be read
 ENDPOINTS
+
+# An empty PR_NUMBER is a real case, not a caller bug: tests.yml calls the workflow on
+# `push: branches: [main]`, where there is no pull request. The first guard in the script was
+# written `${PR_NUMBER:?}`, which fires on empty as well as unset, so the whole script exited on
+# line 26 of every main-push smoke run -- the run stayed green because the step is
+# continue-on-error, and the smoke test silently stopped covering anything past that line.
+# The reads are expected to degrade here; what matters is that the script gets to them.
+PR_NUMBER='' run_step "no pull request number" > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when there is no pull request number"
+if grep -q "must set PR_NUMBER" "$WORK/step.out"; then
+  echo "FAIL an empty PR_NUMBER aborts the script; a main-push smoke run covers nothing"
+  failures=$((failures + 1))
+else
+  echo "ok   an empty PR_NUMBER degrades the reads instead of aborting the script"
+fi
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures test(s) failed"

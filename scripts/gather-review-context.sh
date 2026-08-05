@@ -23,7 +23,13 @@
 # assume it.
 set -eo pipefail
 
-: "${PR_NUMBER:?the calling step must set PR_NUMBER}"
+# `?` and not `:?` for PR_NUMBER, so unset is an error but empty is not. tests.yml calls the
+# workflow on `push: branches: [main]` too, where there is no pull request and the number is
+# legitimately empty; the reads below then degrade into their guarded "could not read" sentences,
+# which is what the inline version did and what keeps the main-push smoke run exercising the
+# script rather than stopping on its first line. REPO comes from github.repository and is never
+# legitimately empty, so it keeps `:?`.
+: "${PR_NUMBER?the calling step must set PR_NUMBER}"
 : "${REPO:?the calling step must set REPO}"
 
 # Caps. The median PR reviewed across the org is 161 changed lines and the largest
