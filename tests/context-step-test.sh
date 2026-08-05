@@ -109,7 +109,23 @@ case "$args" in
   *"/pulls/"*"/comments"*) fail_if_marked comments; echo '[]' ;;
   *"/pulls/"*"/commits"*)  fail_if_marked commits; cat "$FIXTURES/pull-commits.json" ;;
   *"/pulls/"*"/files"*)    fail_if_marked files; cat "$FIXTURES/pull-files.json" ;;
-  *"/issues/"*"/comments"*) fail_if_marked issue_comments; cat "$FIXTURES/issue-comments.json" ;;
+  *"/issues/"*"/comments"*)
+    fail_if_marked issue_comments
+    if [ "$STUB_CONVO_COMMENTS" -gt 0 ]; then
+      awk -v n="$STUB_CONVO_COMMENTS" 'BEGIN {
+        printf "[";
+        for (i = 0; i < n; i++) {
+          body = "";
+          for (j = 0; j < 60; j++) body = body "padding text to make this comment long ";
+          if (i) printf ",";
+          printf "{\"id\":%d,\"user\":{\"login\":\"human\"},\"created_at\":\"2026-08-0%dT00:00:00Z\",\"body\":\"%s\"}", i, (i % 9) + 1, body;
+        }
+        printf "]\n";
+      }'
+    else
+      cat "$FIXTURES/issue-comments.json"
+    fi
+    ;;
   *"statusCheckRollup"*)   fail_if_marked rollup; cat "$FIXTURES/rollup-mixed.json" ;;
   *"/actions/jobs/"*"/logs"*)
     fail_if_marked job_logs
@@ -165,6 +181,7 @@ run_step() {
     STUB_JOB_LOG="${STUB_JOB_LOG:-job-log-django.txt}" \
     GH_VERSION="${GH_VERSION:-2.96}" \
     COMPARE_STATUS="${COMPARE_STATUS:-ahead}" \
+    STUB_CONVO_COMMENTS="${STUB_CONVO_COMMENTS:-0}" \
     STUB_DIFF_LINES="${STUB_DIFF_LINES:-40}" \
     FAIL_ENDPOINT="${FAIL_ENDPOINT:-none}" \
     HEAD_SHA="${HEAD_SHA:-1d01475432236aa4fbca722aaaa2687c2b2e4947}" \
@@ -398,6 +415,21 @@ expect "$(grep -c '^+line ' "$CTX_FILE")" "3000" "truncated diff carries exactly
 STUB_DIFF_LINES=0 run_step > "$WORK/code.txt"
 expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on an empty diff"
 expect_context 'came back empty' "an empty diff says so rather than showing a bare heading"
+
+# The byte cap. Reaching it is a claim too: the cut lands wherever the byte count runs out,
+# so the notice has to be appended *after* the cut or it is the first thing removed. And the
+# ordering of the blocks is what decides whose content is lost -- the conversation is last
+# because it is the block the reviewer can most afford to lose, while the diff and the CI
+# status have to survive.
+STUB_CONVO_COMMENTS=300 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when the context exceeds the byte cap"
+expect_context '\(context truncated at 600000 bytes\)' \
+  "the truncation notice survives the truncation"
+expect_context '^## Full diff' "the diff block survives the truncation"
+expect_context '^\+line 1$' "the diff body survives the truncation"
+expect_context '^## CI checks' "the CI block survives the truncation"
+expect "$(wc -c < "$CTX_FILE" | tr -d ' ' | awk '{print ($1 < 620000) ? "capped" : "over"}')" \
+  "capped" "the rendered context stays near the cap"
 
 # --- Degradation --------------------------------------------------------------------------
 
