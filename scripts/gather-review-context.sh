@@ -205,15 +205,21 @@ strip_block_tags() {
   perl -pe 's{< \s* /? \s* (?: pr_context | prior_review_comments ) [^>]* >}{[block tag removed]}gix'
 }
 
+# strip_block_tags runs BEFORE the cap, not on the way out. The substitution can grow
+# the text -- a 12-byte `<pr_context>` becomes a 19-byte `[block tag removed]` -- so
+# capping first and stripping afterwards would bound something other than what is
+# emitted, and an author who writes that tag a few hundred times gets the assembled
+# prompt back over MAX_ARG_STRLEN. Stripping first also means a cut cannot leave a live
+# tag behind: there are none left for it to bisect.
 THREADS_FILE="${RUNNER_TEMP}/threads.md"
-printf '%s\n' "$THREADS" > "$THREADS_FILE"
+printf '%s\n' "$THREADS" | strip_block_tags > "$THREADS_FILE"
 cap_file "$THREADS_FILE" "$THREADS_MAX_BYTES" \
   "prior review comments truncated at ${THREADS_MAX_BYTES} bytes; read the rest with gh pr view"
 
 DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
 {
   echo "threads<<${DELIMITER}"
-  strip_block_tags < "$THREADS_FILE"
+  cat "$THREADS_FILE"
   echo "${DELIMITER}"
 } >> $GITHUB_OUTPUT
 
@@ -449,6 +455,13 @@ CTX_MAX_BYTES=$((PROMPT_BUDGET - THREADS_BYTES))
 if [ "$CTX_MAX_BYTES" -lt 0 ]; then
   CTX_MAX_BYTES=0
 fi
+# Stripped before the cap, for the same reason as the threads block above: the
+# substitution grows `<pr_context>` from 12 bytes to 19, so a cap applied to the
+# unstripped file bounds a smaller string than the one actually emitted. This is the
+# block where it matters most -- the diff, the PR body and the log excerpt are all
+# author-controlled, and this is the file they land in.
+strip_block_tags < "$CTX" > "$CTX.stripped"
+mv "$CTX.stripped" "$CTX"
 if [ "$(wc -c < "$CTX" | tr -d " ")" -gt "$CTX_MAX_BYTES" ]; then
   echo "::warning::Review context exceeded ${CTX_MAX_BYTES} bytes and was truncated."
 fi
@@ -458,6 +471,6 @@ cap_file "$CTX" "$CTX_MAX_BYTES" \
 CTX_DELIMITER="PR_CONTEXT_$(openssl rand -hex 16)"
 {
   echo "pr_context<<${CTX_DELIMITER}"
-  strip_block_tags < "$CTX"
+  cat "$CTX"
   echo "${CTX_DELIMITER}"
 } >> $GITHUB_OUTPUT

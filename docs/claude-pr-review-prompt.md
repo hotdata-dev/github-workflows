@@ -11,6 +11,10 @@ Everything in `<pr_context>` is already in front of you. Do not spend a tool cal
 
 **Unless it is not there.** If `<pr_context>` is empty, or a block inside it says it could not be read, then that block is genuinely missing — fetch what you need yourself with `gh pr diff` or `gh pr view`, and say in your review that you reviewed without it. Never treat a missing block as evidence: an absent CI block does not mean CI is clean, and an absent diff does not mean nothing changed.
 
+**Or if it was cut short.** A block may end with a notice that it was truncated — `context truncated at N bytes`, or `(truncated: first N of M lines`. The part you were given is real, but the rest of that block exists and you have not seen it. Do not review as though you had. Fetch the remainder with `gh pr diff` or `gh pr view` before drawing any conclusion about the code that was cut, and **state plainly at the top of your review that your context was truncated and what you did about it.** A truncated diff is the one case where the instruction above not to re-fetch does not apply.
+
+This matters most when you approve. An approval formed on a partial diff, presented as though it were formed on the whole one, is worse than no review — a human reads it as coverage it does not have. If you could not see all of the change and could not fetch the rest, say so and do not approve on the strength of what you did see.
+
 ## Tools
 
 Available: `Read`, `Grep`, `Glob`, `rg`, and `gh pr diff` / `gh pr view` / `gh pr review` / `gh pr comment`. Nothing else — every other command is refused, and each refusal costs a turn.

@@ -176,7 +176,13 @@ case "$args" in
   *"pr diff"*)
     fail_if_marked diff
     require_escape_flag "$args"
-    awk -v n="$STUB_DIFF_LINES" 'BEGIN { for (i = 1; i <= n; i++) print "+line " i }'
+    # STUB_DIFF_TAGS puts a block tag on every added line. strip_block_tags rewrites the
+    # 12-byte opening tag to a 19-byte placeholder, so this is the one input shape that
+    # makes the emitted output larger than the file the cap measured. Padding text cannot
+    # reach it: the substitution has to fire.
+    awk -v n="$STUB_DIFF_LINES" -v tagged="$STUB_DIFF_TAGS" 'BEGIN {
+      for (i = 1; i <= n; i++) print (tagged == "1" ? "+<pr_context> line " i : "+line " i)
+    }'
     ;;
   *) echo "gh stub: unhandled args: $args" >&2; exit 1 ;;
 esac
@@ -204,6 +210,7 @@ run_step() {
     STUB_CONVO_COMMENTS="${STUB_CONVO_COMMENTS:-0}" \
     STUB_THREAD_COMMENTS="${STUB_THREAD_COMMENTS:-0}" \
     STUB_DIFF_LINES="${STUB_DIFF_LINES:-40}" \
+    STUB_DIFF_TAGS="${STUB_DIFF_TAGS:-0}" \
     FAIL_ENDPOINT="${FAIL_ENDPOINT:-none}" \
     HEAD_SHA="${HEAD_SHA:-1d01475432236aa4fbca722aaaa2687c2b2e4947}" \
     BASE_REF=main \
@@ -604,6 +611,25 @@ if [ "$WRAPPER_BYTES" -lt 100 ]; then
   failures=$((failures + 1))
 fi
 
+# Of the three terms the budget subtracts, the wrapper is the only one the script states as a
+# constant rather than measuring, so it is the only one that can go stale. Compared against
+# the measurement here, and the constant is extracted from the script rather than repeated --
+# the way this suite already pulls its jq programs out of the shipped shell -- because two
+# copies of the number would be free to drift in exactly the direction that matters. Without
+# this the wrapper could grow by the whole remaining slack and the *total* assertion would be
+# what failed, naming the symptom instead of the cause.
+DECLARED_WRAPPER=$(sed -n 's/^PROMPT_WRAPPER_BYTES=\([0-9]*\)$/\1/p' "$CONTEXT_SCRIPT")
+if [ -z "$DECLARED_WRAPPER" ]; then
+  echo "FAIL no PROMPT_WRAPPER_BYTES=<n> assignment found in $CONTEXT_SCRIPT" >&2
+  failures=$((failures + 1))
+elif [ "$WRAPPER_BYTES" -gt "$DECLARED_WRAPPER" ]; then
+  echo "FAIL the prompt wrapper measures $WRAPPER_BYTES bytes against PROMPT_WRAPPER_BYTES=$DECLARED_WRAPPER"
+  echo "     the budget is over-spending by the difference; raise the constant in $CONTEXT_SCRIPT"
+  failures=$((failures + 1))
+else
+  echo "ok   measured prompt wrapper $WRAPPER_BYTES is within PROMPT_WRAPPER_BYTES=$DECLARED_WRAPPER"
+fi
+
 # Everything oversized at once. Oversizing one input at a time is precisely what let the old
 # pair of caps look safe: each block sat inside its own limit while the total did not fit.
 STUB_THREAD_COMMENTS=60 STUB_CONVO_COMMENTS=60 STUB_DIFF_LINES=4000 \
@@ -637,6 +663,40 @@ if [ "$ctx_bytes" -gt $((PROMPT_ARG_LIMIT / 4)) ]; then
 else
   echo "FAIL an oversized review history starved the context: only $ctx_bytes bytes left"
   failures=$((failures + 1))
+fi
+
+# The same bound, against the one input that can defeat a cap applied in the wrong order.
+# strip_block_tags rewrites a 12-byte `<pr_context>` to a 19-byte placeholder, so a cap
+# measured before that substitution bounds a smaller string than the one emitted -- about
+# 1.58x smaller at worst, and an author only has to write the tag a few hundred times to
+# put the prompt back over the limit. It is reachable on purpose: the substitution exists
+# precisely because author text can contain these tags. Padding-text inputs cannot catch
+# this, because no substitution fires and the emitted size equals the capped size.
+STUB_THREAD_COMMENTS=60 STUB_CONVO_COMMENTS=60 STUB_DIFF_LINES=4000 STUB_DIFF_TAGS=1 \
+  run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when the context is dense with block tags"
+
+tagged_bytes=$(( $(wc -c < "$THREADS_FILE_OUT" | tr -d ' ') \
+  + $(wc -c < "$CTX_FILE" | tr -d ' ') + WRAPPER_BYTES + STATIC_PROMPT_BYTES ))
+if [ "$tagged_bytes" -le "$PROMPT_ARG_LIMIT" ]; then
+  echo "ok   assembled prompt fits MAX_ARG_STRLEN when block-tag substitution grows the text" \
+    "($tagged_bytes <= $PROMPT_ARG_LIMIT)"
+else
+  echo "FAIL block-tag substitution pushed the assembled prompt past MAX_ARG_STRLEN:"
+  printf '     %s bytes, limit %s -- the cap measured the text before it grew\n' \
+    "$tagged_bytes" "$PROMPT_ARG_LIMIT"
+  failures=$((failures + 1))
+fi
+
+# And nothing may survive the cut as a live tag. Stripping before the cap is what
+# guarantees it: a truncation can bisect `[block tag removed]`, which is inert, but it
+# can no longer leave half of a real tag behind.
+if grep -qE '<[[:space:]]*/?[[:space:]]*(pr_context|prior_review_comments)' "$CTX_FILE"; then
+  echo "FAIL a live block tag survived into the emitted context"
+  grep -nE '<[[:space:]]*/?[[:space:]]*(pr_context|prior_review_comments)' "$CTX_FILE" | head -3
+  failures=$((failures + 1))
+else
+  echo "ok   no live block tag survives into the emitted context"
 fi
 
 if [ "$failures" -ne 0 ]; then
