@@ -32,15 +32,49 @@ set -eo pipefail
 DIFF_MAX=3000
 SINCE_MAX=2000
 LOG_WINDOW=120
-# Byte budgets, split across the step's two outputs rather than applied to one of
-# them. threads is its own output written before the context file, so a cap that
-# only measured the context bounded nothing: 400 inline comments rendered 1.1 MB of
-# threads on their own. The total here is deliberately far below any plausible
-# runner limit -- the largest PR reviewed across the org in a week rendered about
-# 150 KB -- because the runner accounts for output size in UTF-16, so a byte count
-# here is not the number it checks against.
+# Byte budgets. Both of this step's outputs are interpolated into the SAME `prompt:`
+# string in the review step, and that string reaches the reviewer as one environment
+# variable -- so the binding limit is the kernel's MAX_ARG_STRLEN, 32 * PAGE_SIZE =
+# 131072 on the runners, not the step-output limit. Past it, exec fails with
+# "Argument list too long" before the reviewer starts. That failure is near-silent:
+# the action reports success, the tool-usage steps skip for want of an execution log,
+# no review of any kind is posted, and only the generic notify message says anything.
+# A pull request rendering 186 KB of prompt failed exactly that way while threads and
+# context each sat inside their own former caps -- 100 KB and 200 KB, a pair that
+# could sum to 300 KB against a 131 KB limit. Hence a budget on the SUM.
+#
+# The earlier note here reasoned about the runner's UTF-16 accounting of step outputs.
+# That limit is real and separate; it is not the one that fails first.
+PROMPT_ARG_LIMIT=131072
+# What the workflow wraps around the two outputs: 494 bytes of literal header and the
+# two data-tag blocks with their do-not-follow notices, plus the interpolated REPO,
+# PR number and cycle. Rounded up.
+PROMPT_WRAPPER_BYTES=600
+# The static prompt is appended to that same string and spends the same budget, so it
+# is measured rather than hard-coded: editing the prompt document must shrink what is
+# left for context, not silently overflow the limit.
+PROMPT_DOC="$(dirname "$0")/../docs/claude-pr-review-prompt.md"
+if [ -r "$PROMPT_DOC" ]; then
+  PROMPT_DOC_BYTES=$(wc -c < "$PROMPT_DOC" | tr -d " ")
+else
+  # A moved path or a narrowed sparse-checkout pattern. Assume large rather than
+  # assume nothing: an over-generous figure truncates context, a missing one puts the
+  # exec failure back.
+  PROMPT_DOC_BYTES=20000
+  echo "::warning::Could not measure ${PROMPT_DOC}; assuming ${PROMPT_DOC_BYTES} bytes when sizing the prompt budget."
+fi
+# 1 KB of slack. Deliberately small: every byte held back here is context the reviewer
+# does not get, and the three terms above are measured rather than estimated. The
+# budget lands near 122 KB, so a pull request that assembles under the limit today is
+# not newly truncated -- only the ones that already fail outright change behaviour.
+PROMPT_BUDGET=$((PROMPT_ARG_LIMIT - PROMPT_WRAPPER_BYTES - PROMPT_DOC_BYTES - 1024))
+# threads keeps a cap of its own so a comment dump cannot eat the budget the diff
+# needs: 400 inline comments rendered 1.1 MB on their own. It is also held to half the
+# budget, so a long review history can never starve the diff completely.
 THREADS_MAX_BYTES=100000
-CTX_MAX_BYTES=200000
+if [ "$THREADS_MAX_BYTES" -gt $((PROMPT_BUDGET / 2)) ]; then
+  THREADS_MAX_BYTES=$((PROMPT_BUDGET / 2))
+fi
 # One job log can be mostly a single line: LOG_WINDOW counts lines and a CI log
 # line has no length limit, so a base64 or JSON dump next to the first error marker
 # would otherwise consume the whole context ahead of the diff.
@@ -402,12 +436,24 @@ else
 fi
 { echo; echo "## PR conversation"; printf '%s\n' "$CONVO"; } >> "$CTX"
 
-# Last resort against an unbounded block -- the per-block caps above should keep
-# the file far below this, so hitting it means one of them regressed.
+# The bound that keeps the assembled prompt inside MAX_ARG_STRLEN. Context gets what
+# the threads block did not spend; threads is capped and written by this point, so its
+# final size is known rather than assumed. The per-block caps above still matter -- they
+# decide *what* survives truncation, and they keep any one block from arriving here
+# having already crowded out the diff -- but this is what makes the total fit.
+THREADS_BYTES=$(wc -c < "$THREADS_FILE" | tr -d " ")
+CTX_MAX_BYTES=$((PROMPT_BUDGET - THREADS_BYTES))
+# Unreachable while THREADS_MAX_BYTES is clamped to half the budget. Kept because the
+# alternative if that clamp is ever loosened is `head -c` with a negative count, and an
+# empty context degrades a review where a failing cap_file loses it entirely.
+if [ "$CTX_MAX_BYTES" -lt 0 ]; then
+  CTX_MAX_BYTES=0
+fi
 if [ "$(wc -c < "$CTX" | tr -d " ")" -gt "$CTX_MAX_BYTES" ]; then
   echo "::warning::Review context exceeded ${CTX_MAX_BYTES} bytes and was truncated."
 fi
-cap_file "$CTX" "$CTX_MAX_BYTES" "context truncated at ${CTX_MAX_BYTES} bytes"
+cap_file "$CTX" "$CTX_MAX_BYTES" \
+  "context truncated at ${CTX_MAX_BYTES} bytes; read what is missing with gh pr diff and gh pr view"
 
 CTX_DELIMITER="PR_CONTEXT_$(openssl rand -hex 16)"
 {

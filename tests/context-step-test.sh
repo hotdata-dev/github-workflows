@@ -214,6 +214,11 @@ run_step() {
   set -e
   awk '/^pr_context<</ { d = substr($0, 13); next } d && $0 == d { exit } d' \
     "$WORK/out.txt" > "$CTX_FILE"
+  # threads is the step's other output, and it is interpolated into the same prompt string as
+  # pr_context -- so a suite that only ever materialises the context cannot assert anything
+  # about their combined size, which is the quantity the prompt is actually bounded by.
+  awk '/^threads<</ { d = substr($0, 10); next } d && $0 == d { exit } d' \
+    "$WORK/out.txt" > "$THREADS_FILE_OUT"
   echo "$STEP_STATUS"
 }
 
@@ -226,6 +231,11 @@ run_step() {
 # Set here, not in run_step: run_step is called in a command substitution, so anything it
 # assigns dies with the subshell. The file it writes survives, which is the point.
 CTX_FILE="$WORK/ctx.txt"
+THREADS_FILE_OUT="$WORK/threads.txt"
+# The kernel's MAX_ARG_STRLEN, 32 * PAGE_SIZE on the runners. The prompt reaches the reviewer
+# as one environment string, so this bounds everything this step emits into it. Defined up
+# here because more than one assertion below is about it.
+PROMPT_ARG_LIMIT=131072
 context() {
   cat "$CTX_FILE"
 }
@@ -482,13 +492,21 @@ expect_context 'came back empty' "an empty diff says so rather than showing a ba
 # status have to survive.
 STUB_CONVO_COMMENTS=300 run_step > "$WORK/code.txt"
 expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when the context exceeds the byte cap"
-expect_context '\(context truncated at 200000 bytes\)' \
+# No byte count in this pattern: the cap is derived per run now -- from the argument limit
+# less the wrapper, the prompt document and the threads block -- so asserting a literal here
+# would pin a number that is no longer a constant, and pin it to whichever value happened to
+# ship. What has to hold is that the notice is present and names a figure.
+expect_context '\(context truncated at [0-9]+ bytes' \
   "the truncation notice survives the truncation"
 expect_context '^## Full diff' "the diff block survives the truncation"
 expect_context '^\+line 1$' "the diff body survives the truncation"
 expect_context '^## CI checks' "the CI block survives the truncation"
-expect "$(wc -c < "$CTX_FILE" | tr -d ' ' | awk '{print ($1 < 210000) ? "capped" : "over"}')" \
-  "capped" "the rendered context stays near the cap"
+# The assertion this replaces allowed 210000 bytes, which was above the limit the prompt is
+# actually bounded by -- it would have passed on a context that could not be handed to the
+# reviewer at all. The bound is the argument limit.
+expect "$(wc -c < "$CTX_FILE" | tr -d ' ' \
+  | awk -v lim="$PROMPT_ARG_LIMIT" '{print ($1 <= lim) ? "capped" : "over"}')" \
+  "capped" "the rendered context stays inside the argument limit"
 
 # The other half of the budget. `threads` is a separate step output, written before the
 # capped file, so a cap that only measures CTX does not bound what the step emits. Hundreds
@@ -556,6 +574,70 @@ job_logs|(log unavailable)
 reviews|prior reviews could not be read
 comments|prior inline review comments could not be read
 ENDPOINTS
+
+# --- The assembled prompt fits in one environment string ----------------------------------
+#
+# Both of this step's outputs are interpolated into the same `prompt:` value, and the review
+# action hands that to the reviewer as a single environment string -- so the kernel's
+# MAX_ARG_STRLEN (32 * PAGE_SIZE) bounds their SUM. Past it, exec fails with "Argument list
+# too long" while the action still reports success: no execution log, the tool-usage steps
+# skip for want of one, no review of any kind is posted, and the only trace is the generic
+# "review unavailable" notice. A pull request rendering 186 KB failed exactly that way with
+# threads and context each inside their own former caps -- 100 KB and 200 KB, a pair free to
+# sum to 300 KB. So the assertion is on the total, which is what no cap was measuring.
+
+# Measured out of the workflow rather than hard-coded, so adding a header line or another
+# do-not-follow notice to the prompt block fails here instead of quietly spending budget the
+# script believes it has. The sed drops the block indentation Actions strips, then the
+# interpolations, leaving only literal text.
+WRAPPER_BYTES=$(
+  awk '/^ *prompt: \|$/ { p = 1; next } p && /^ *claude_args:/ { exit } p' "$WORKFLOW" \
+    | sed -E 's/^ {12}//' \
+    | sed -E 's/\$\{\{[^}]*\}\}//g' \
+    | wc -c | tr -d ' '
+)
+STATIC_PROMPT_BYTES=$(wc -c < docs/claude-pr-review-prompt.md | tr -d ' ')
+
+if [ "$WRAPPER_BYTES" -lt 100 ]; then
+  echo "FAIL could not measure the prompt wrapper out of $WORKFLOW (got $WRAPPER_BYTES bytes)" >&2
+  echo "     the prompt: block shape changed, so this assertion is no longer measuring it" >&2
+  failures=$((failures + 1))
+fi
+
+# Everything oversized at once. Oversizing one input at a time is precisely what let the old
+# pair of caps look safe: each block sat inside its own limit while the total did not fit.
+STUB_THREAD_COMMENTS=60 STUB_CONVO_COMMENTS=60 STUB_DIFF_LINES=4000 \
+  run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 with every input oversized at once"
+
+threads_bytes=$(wc -c < "$THREADS_FILE_OUT" | tr -d ' ')
+ctx_bytes=$(wc -c < "$CTX_FILE" | tr -d ' ')
+prompt_bytes=$((threads_bytes + ctx_bytes + WRAPPER_BYTES + STATIC_PROMPT_BYTES))
+
+if [ "$prompt_bytes" -le "$PROMPT_ARG_LIMIT" ]; then
+  echo "ok   assembled prompt fits MAX_ARG_STRLEN with every input oversized" \
+    "($prompt_bytes <= $PROMPT_ARG_LIMIT)"
+else
+  echo "FAIL assembled prompt exceeds MAX_ARG_STRLEN with every input oversized:"
+  printf '     threads %s + context %s + wrapper %s + prompt doc %s = %s, limit %s\n' \
+    "$threads_bytes" "$ctx_bytes" "$WRAPPER_BYTES" "$STATIC_PROMPT_BYTES" \
+    "$prompt_bytes" "$PROMPT_ARG_LIMIT"
+  failures=$((failures + 1))
+fi
+
+# Truncating silently would be worse than truncating: the reviewer would report on a diff it
+# never saw, with no way to know it had not seen it.
+expect_context 'context truncated at' "an over-budget context says it was truncated"
+
+# The diff has to keep room. A long enough review history could otherwise spend the whole
+# budget on prior comments and leave the reviewer with nothing to review -- which is why the
+# threads cap is held to half the budget rather than being a fixed number beside it.
+if [ "$ctx_bytes" -gt $((PROMPT_ARG_LIMIT / 4)) ]; then
+  echo "ok   the diff keeps room against an oversized review history ($ctx_bytes bytes)"
+else
+  echo "FAIL an oversized review history starved the context: only $ctx_bytes bytes left"
+  failures=$((failures + 1))
+fi
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures test(s) failed"
