@@ -146,7 +146,32 @@ fi
 # One job log can be mostly a single line: LOG_WINDOW counts lines and a CI log
 # line has no length limit, so a base64 or JSON dump next to the first error marker
 # would otherwise consume the whole context ahead of the diff.
+#
+# Two caps, because a per-excerpt one does not bound the set. FAILING_JOBS_JQ takes
+# three jobs and each writes two excerpts -- a summary and a window -- so 40000 apiece
+# is a 240 KB ceiling on log text, twice PROMPT_BUDGET, and all of it ordered above
+# `## Full diff`. The byte cap cuts from the tail, so the diff is the block that pays:
+# three verbose failing jobs took it out of the context entirely. 40000 was sized
+# against the old 200 KB context cap and is the one per-block cap the budget left
+# stale, so it is scaled off PROMPT_BUDGET like THREADS_MAX_BYTES and the excerpts
+# share one allowance between them.
+LOG_BUDGET=$((PROMPT_BUDGET / 4))
 LOG_MAX_BYTES=40000
+if [ "$LOG_MAX_BYTES" -gt "$LOG_BUDGET" ]; then
+  LOG_MAX_BYTES=$LOG_BUDGET
+fi
+LOG_REMAINING=$LOG_BUDGET
+# The truncation notices, as constants rather than literals at their call sites. The
+# prompt document quotes them and tells the reviewer that seeing one means the block is
+# incomplete and the rest has to be fetched before drawing conclusions from it -- so a
+# notice whose wording moves without the document moving with it is a notice the
+# reviewer no longer recognises, and a partial review comes back looking like a whole
+# one. Two of these had already drifted that way. tests/context-step-test.sh reads them
+# out of here and fails if the document stops quoting one.
+NOTICE_CONTEXT='context truncated to fit the review prompt'
+NOTICE_THREADS='prior review comments truncated'
+NOTICE_LOG='log excerpt truncated'
+NOTICE_LINES='truncated: first'
 CTX="${RUNNER_TEMP}/pr-context.md"
 : > "$CTX"
 
@@ -168,6 +193,34 @@ cap_file() {
     mv "$1.cut" "$1"
     echo "($3)" >> "$1"
   fi
+}
+
+# cap_log_excerpt <file> <notice> -- cap one log excerpt against what is left of the
+# shared allowance, then charge what it emitted against that allowance. Both bounds in
+# one place, because the per-excerpt one is what a reader checks and the total is what
+# actually protects the diff. Charging the size *after* the cap counts the notice line
+# too, so the excerpts cannot overspend by announcing themselves.
+#
+# A later job can be cut to nothing this way, which is the intended order: the first
+# failing job is the one whose cause is usually being read, and an excerpt reduced to
+# its truncation notice still tells the reviewer the log exists and was not empty.
+cap_log_excerpt() {
+  local limit=$LOG_MAX_BYTES
+  if [ "$LOG_REMAINING" -lt "$limit" ]; then limit=$LOG_REMAINING; fi
+  if [ "$limit" -lt 1 ]; then
+    # Not cap_file with a zero limit: `head -c 0` is an error on BSD head rather than an
+    # empty file, and this script runs under `set -e`, so that would abort the step and
+    # cost the review the whole context -- which is the failure this file exists to avoid,
+    # arrived at from the other direction.
+    if [ -s "$1" ]; then
+      : > "$1"
+      echo "($2)" >> "$1"
+    fi
+  else
+    cap_file "$1" "$limit" "$2"
+  fi
+  LOG_REMAINING=$((LOG_REMAINING - $(wc -c < "$1" | tr -d ' ')))
+  if [ "$LOG_REMAINING" -lt 0 ]; then LOG_REMAINING=0; fi
 }
 
 # cap_file_escaped <file> <budget> <notice> -- trim <file> until it fits <budget> once
@@ -323,7 +376,7 @@ strip_block_tags() {
 THREADS_FILE="${RUNNER_TEMP}/threads.md"
 printf '%s\n' "$THREADS" | strip_block_tags > "$THREADS_FILE"
 cap_file_escaped "$THREADS_FILE" "$THREADS_MAX_BYTES" \
-  "prior review comments truncated; read the rest with gh pr view"
+  "${NOTICE_THREADS}; read the rest with gh pr view"
 
 DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
 {
@@ -426,7 +479,7 @@ for JOB_ID in $JOB_IDS; do
   if [ -n "$SUMMARY" ]; then
     EXCERPT="${RUNNER_TEMP}/job-${JOB_ID}-summary.txt"
     printf '%s\n' "$SUMMARY" > "$EXCERPT"
-    cap_file "$EXCERPT" "$LOG_MAX_BYTES" "summary truncated"
+    cap_log_excerpt "$EXCERPT" "${NOTICE_LOG}: summary lines"
     { echo "Summary lines:"; cat "$EXCERPT"; echo; } >> "$CTX"
   fi
   # The *first* error marker: later steps in the same job add their own, and the
@@ -445,8 +498,7 @@ for JOB_ID in $JOB_IDS; do
     if [ "$START" -lt 1 ]; then START=1; fi
     EXCERPT="${RUNNER_TEMP}/job-${JOB_ID}-window.txt"
     sed -n "${START},${ERR_LINE}p" "$JOB_LOG" > "$EXCERPT"
-    cap_file "$EXCERPT" "$LOG_MAX_BYTES" \
-      "log excerpt truncated at ${LOG_MAX_BYTES} bytes"
+    cap_log_excerpt "$EXCERPT" "${NOTICE_LOG}; read the rest in the job log"
     {
       echo "Log lines ${START}-${ERR_LINE}, ending at the first error:"
       cat "$EXCERPT"
@@ -454,8 +506,7 @@ for JOB_ID in $JOB_IDS; do
   else
     EXCERPT="${RUNNER_TEMP}/job-${JOB_ID}-tail.txt"
     tail -n "$LOG_WINDOW" "$JOB_LOG" > "$EXCERPT"
-    cap_file "$EXCERPT" "$LOG_MAX_BYTES" \
-      "log excerpt truncated at ${LOG_MAX_BYTES} bytes"
+    cap_log_excerpt "$EXCERPT" "${NOTICE_LOG}; read the rest in the job log"
     { echo "Last ${LOG_WINDOW} log lines:"; cat "$EXCERPT"; } >> "$CTX"
   fi
 done
@@ -501,7 +552,7 @@ if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" != "null" ] && [ "$LAST_SHA" != "$HEAD_SH
       echo "## Diff since your last review (${LAST_SHA} to ${HEAD_SHA})"
       head -n "$SINCE_MAX" "$SINCE_FILE"
       if [ "$SINCE_LINES" -gt "$SINCE_MAX" ]; then
-        echo "(truncated: first ${SINCE_MAX} of ${SINCE_LINES} lines)"
+        echo "(${NOTICE_LINES} ${SINCE_MAX} of ${SINCE_LINES} lines)"
       fi
     } >> "$CTX"
   else
@@ -538,7 +589,7 @@ if fetch_raw "$DIFF_FILE" pr diff "$PR_NUMBER" --repo "$REPO"; then
     else
       head -n "$FULL_DIFF_MAX" "$DIFF_FILE"
       if [ "$DIFF_LINES" -gt "$FULL_DIFF_MAX" ]; then
-        echo "(truncated: first ${FULL_DIFF_MAX} of ${DIFF_LINES} lines; run gh pr diff for the rest)"
+        echo "(${NOTICE_LINES} ${FULL_DIFF_MAX} of ${DIFF_LINES} lines; run gh pr diff for the rest)"
       fi
     fi
   } >> "$CTX"
@@ -591,7 +642,7 @@ if [ "$CTX_ESCAPED" -gt "$CTX_MAX_BYTES" ]; then
   echo "::notice::Review context reached ${CTX_ESCAPED} escaped bytes against a ${CTX_MAX_BYTES} byte budget and was truncated to fit the review prompt."
 fi
 cap_file_escaped "$CTX" "$CTX_MAX_BYTES" \
-  "context truncated to fit the review prompt; read what is missing with gh pr diff and gh pr view"
+  "${NOTICE_CONTEXT}; read what is missing with gh pr diff and gh pr view"
 
 CTX_DELIMITER="PR_CONTEXT_$(openssl rand -hex 16)"
 {
