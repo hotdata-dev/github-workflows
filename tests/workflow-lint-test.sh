@@ -162,6 +162,35 @@ check_permission "statusCheckRollup" statuses "the StatusContext half of the CI 
 check_permission "/compare/" contents "the since-last-review comparison"
 check_permission "/pulls/" pull-requests "the PR reads"
 
+# A missing context script has to fail loudly somewhere, and it cannot be the context step: that
+# one is continue-on-error, so `bash <missing file>` exits 127 into a green run. The prompt
+# document gets this for free -- `cat` on a missing file fails its step -- and the script needs an
+# explicit check to match.
+#
+# Scoped to the step, not grepped over the file, because where the check sits is the whole property
+# being asserted: the same `-f` test moved into the context step would satisfy a file-wide grep and
+# prove nothing. So pull the one step and require both halves -- that it tests for the script, and
+# that it is not continue-on-error.
+precondition_step=$(awk '/^      - name: Verify the context step.s preconditions$/ { found = 1; next }
+                         found && /^      - / { exit }
+                         found { print }' "$WORKFLOW_FILE")
+if [ -z "$precondition_step" ]; then
+  echo "FAIL no 'Verify the context step's preconditions' step in $WORKFLOW_FILE; a missing"
+  echo "     context script would exit 127 inside a continue-on-error step and leave the run"
+  echo "     green with an empty context"
+  failures=$((failures + 1))
+elif ! printf '%s\n' "$precondition_step" | grep -q -- '-f .*gather-review-context\.sh\|script=.*gather-review-context\.sh'; then
+  echo "FAIL the precondition step does not test for the context script:"
+  printf '%s\n' "$precondition_step" | sed 's/^/       /'
+  failures=$((failures + 1))
+elif printf '%s\n' "$precondition_step" | grep -q 'continue-on-error'; then
+  echo "FAIL the precondition step is continue-on-error, so the check it makes cannot fail the"
+  echo "     job and proves nothing"
+  failures=$((failures + 1))
+else
+  echo "ok   a missing context script fails the job rather than emptying the context"
+fi
+
 # The context step is continue-on-error, so everything it can fail at -- a checkout that does not
 # deliver the script, a bad path, a rename that stops matching the sparse pattern -- leaves the run
 # green with pr_context, threads and review_cycle all unset. Ungated, the review step then runs on
