@@ -26,12 +26,53 @@ set -eo pipefail
 : "${PR_NUMBER:?the calling step must set PR_NUMBER}"
 : "${REPO:?the calling step must set REPO}"
 
+# How many bytes a file occupies once JSON-escaped. Defined here, above the budget
+# block, because the budget is denominated in escaped bytes -- see PROMPT_ARG_LIMIT
+# below for why that is the unit and not raw bytes.
+#
+# `jq -Rs .` reads the whole file as one JSON string and emits it quoted, which is the
+# transformation toJson() applies to the prompt input. Measured against the run that
+# failed, jq came within 0.5% and on the high side, which is the side to be wrong on.
+#
+# head -c cuts on a byte boundary and so can split a UTF-8 character. jq does not fail
+# on that; it substitutes U+FFFD, three bytes where the fragment was one or two, so a
+# mid-character cut can only over-report. The fallback is for a jq that is missing or
+# refuses outright: two bytes per input byte is what a file of nothing but quotes and
+# newlines costs, and over-estimating only trims more.
+escaped_bytes() {
+  local n=''
+  n=$(jq -Rs . < "$1" 2>/dev/null | wc -c | tr -d ' ') || n=''
+  case "$n" in
+    '' | *[!0-9]*) n=$(( $(wc -c < "$1" | tr -d ' ') * 2 )) ;;
+  esac
+  printf '%s' "$n"
+}
+
 # Caps. The median PR reviewed across the org is 161 changed lines and the largest
 # in a week was 3,448, so 3,000 patch lines covers the corpus; the cap exists so
 # one generated-file PR cannot blow up the prompt.
 DIFF_MAX=3000
 SINCE_MAX=2000
 LOG_WINDOW=120
+# The two diff blocks share one line budget rather than holding independent caps.
+# They overlap by construction: the since-last-review diff is a subset of the full
+# diff, exactly equal to it on a single-file PR, and DIFF_MAX + SINCE_MAX let the pair
+# reach 5,000 lines of largely the same patch. The dashboard PR named below carried 42
+# KB of "since your last review" stacked on 66 KB of "full diff" -- the same file,
+# twice -- and the pair is what put the prompt over the limit.
+#
+# The budget below bounds what that costs, but bounding it is not the same as not
+# spending it: every line the duplicate takes is a line of the budget the rest of the
+# context does not get. So the pair is capped together and the full diff is the block
+# that yields, because on cycle 2+ what changed since the last round is the reviewer's
+# subject and the full patch is one allowlisted `gh pr diff` away. Cycle 1 has no
+# since-diff, so the full diff keeps very nearly the whole budget.
+#
+# No floor is written under the full diff because SINCE_MAX sits below this number:
+# the since-diff can spend at most 2,000 of the 3,000 lines, so the full diff always
+# keeps the remaining 1,000. A floor would be a branch no input reaches. Raising
+# SINCE_MAX to meet or exceed this number is the change that would need one.
+DIFF_BUDGET_LINES=3000
 # Byte budgets. Both of this step's outputs are interpolated into the SAME `prompt:`
 # string in the review step, and that string reaches the reviewer as one environment
 # variable -- so the binding limit is the kernel's MAX_ARG_STRLEN, 32 * PAGE_SIZE =
@@ -46,16 +87,36 @@ LOG_WINDOW=120
 # The earlier note here reasoned about the runner's UTF-16 accounting of step outputs.
 # That limit is real and separate; it is not the one that fails first.
 PROMPT_ARG_LIMIT=131072
+# Every budget below counts *escaped* bytes, because the environment variable that
+# fails first does not hold the prompt as written. claude-code-action's action.yml
+# sets `ALL_INPUTS: toJson(inputs)` on the step it runs, so the prompt is carried
+# twice: once raw as PROMPT, and once JSON-escaped inside ALL_INPUTS. The escaped copy
+# is always the larger of the two, so it is always the one that reaches the limit
+# first, and bounding the raw string leaves the real one unbounded.
+#
+# A Grafana dashboard PR is the proof: 123,401 raw bytes -- inside the limit -- and
+# 135,366 escaped, and it failed on two consecutive pushes. A budget denominated in
+# raw bytes does not see it at all.
+#
+# The expansion is not a constant that could be folded in as a factor. Prose costs
+# about 1.02x and a quote-and-newline dense JSON diff about 1.20x, so the same 3,000
+# lines land either side of the limit depending only on what the file holds. Hence
+# every measurement below runs through escaped_bytes.
+#
+# What toJson(inputs) serializes beside the prompt: 38 further inputs, measured at
+# 1,356 bytes on the run that failed. They are inside the same variable and spend the
+# same limit. Rounded up.
+ALL_INPUTS_OTHER_BYTES=2000
 # What the workflow wraps around the two outputs: 494 bytes of literal header and the
 # two data-tag blocks with their do-not-follow notices, plus the interpolated REPO,
 # PR number and cycle. Rounded up.
 PROMPT_WRAPPER_BYTES=600
 # The static prompt is appended to that same string and spends the same budget, so it
 # is measured rather than hard-coded: editing the prompt document must shrink what is
-# left for context, not silently overflow the limit.
+# left for context, not silently overflow the limit. Measured escaped, like the rest.
 PROMPT_DOC="$(dirname "$0")/../docs/claude-pr-review-prompt.md"
 if [ -r "$PROMPT_DOC" ]; then
-  PROMPT_DOC_BYTES=$(wc -c < "$PROMPT_DOC" | tr -d " ")
+  PROMPT_DOC_BYTES=$(escaped_bytes "$PROMPT_DOC")
 else
   # A moved path or a narrowed sparse-checkout pattern. Assume large rather than
   # assume nothing: an over-generous figure truncates context, a missing one puts the
@@ -64,10 +125,11 @@ else
   echo "::warning::Could not measure ${PROMPT_DOC}; assuming ${PROMPT_DOC_BYTES} bytes when sizing the prompt budget."
 fi
 # 1 KB of slack. Deliberately small: every byte held back here is context the reviewer
-# does not get, and the three terms above are measured rather than estimated. The
-# budget lands near 122 KB, so a pull request that assembles under the limit today is
-# not newly truncated -- only the ones that already fail outright change behaviour.
-PROMPT_BUDGET=$((PROMPT_ARG_LIMIT - PROMPT_WRAPPER_BYTES - PROMPT_DOC_BYTES - 1024))
+# does not get, and the terms above are measured rather than estimated. A pull request
+# that assembles under the limit today is not newly truncated -- only the ones that
+# already fail outright change behaviour.
+PROMPT_BUDGET=$((PROMPT_ARG_LIMIT - ALL_INPUTS_OTHER_BYTES - PROMPT_WRAPPER_BYTES \
+  - PROMPT_DOC_BYTES - 1024))
 # threads keeps a cap of its own so a comment dump cannot eat the budget the diff
 # needs: 400 inline comments rendered 1.1 MB on their own. It is also held to half the
 # budget, so a long review history can never starve the diff completely.
@@ -100,6 +162,47 @@ cap_file() {
     mv "$1.cut" "$1"
     echo "($3)" >> "$1"
   fi
+}
+
+# cap_file_escaped <file> <budget> <notice> -- trim <file> until it fits <budget> once
+# escaped. The raw cut point is found by measuring, scaling and re-measuring rather
+# than by assuming a ratio, because the ratio is a property of the content: the same
+# 3,000 lines cost 1.02x as prose and 1.20x as JSON. Escaped size is monotonic in raw
+# length, so scaling by how far over budget the file is converges downward. Two or
+# three passes is typical on real input; the loop bound is a backstop, not the
+# mechanism.
+cap_file_escaped() {
+  local file=$1 budget=$2 notice=$3 esc raw target i=0
+  # The notice is appended after the cut, so its bytes come out of the budget first. A
+  # cap that put the file back over the limit by announcing itself would be the same
+  # bug in miniature.
+  budget=$((budget - 300))
+  if [ "$budget" -lt 1 ]; then budget=1; fi
+  esc=$(escaped_bytes "$file")
+  if [ "$esc" -le "$budget" ]; then return 0; fi
+  while [ "$i" -lt 8 ]; do
+    raw=$(wc -c < "$file" | tr -d ' ')
+    # The 0.98 is deliberate undershoot: the ratio is measured over the whole file but
+    # applied to a prefix, and a prefix denser than the average would otherwise land
+    # just over and spend another pass.
+    target=$(awk -v r="$raw" -v e="$esc" -v b="$budget" \
+      'BEGIN { t = int(r * b / e * 0.98); print (t < 1) ? 1 : t }')
+    head -c "$target" "$file" > "$file.cut"
+    mv "$file.cut" "$file"
+    esc=$(escaped_bytes "$file")
+    if [ "$esc" -le "$budget" ]; then break; fi
+    i=$((i + 1))
+  done
+  # Drop the partial line the byte cut left behind. A context ending in `"range": tru`
+  # puts a mangled fragment of a patch line where the reviewer reads patch lines, and
+  # it is the last thing before the notice. Guarded on there being an earlier boundary
+  # to fall back to: a block that is one enormous line -- a base64 CI log dump is how
+  # that happens -- has none, and losing all of it would cost more than ending
+  # mid-line. Removing a line only shrinks the file, so the budget still holds.
+  if [ "$(awk 'END {print NR}' "$file")" -gt 1 ]; then
+    if sed '$d' "$file" > "$file.cut"; then mv "$file.cut" "$file"; fi
+  fi
+  echo "($notice)" >> "$file"
 }
 
 fetch_raw() {
@@ -213,8 +316,8 @@ strip_block_tags() {
 # tag behind: there are none left for it to bisect.
 THREADS_FILE="${RUNNER_TEMP}/threads.md"
 printf '%s\n' "$THREADS" | strip_block_tags > "$THREADS_FILE"
-cap_file "$THREADS_FILE" "$THREADS_MAX_BYTES" \
-  "prior review comments truncated at ${THREADS_MAX_BYTES} bytes; read the rest with gh pr view"
+cap_file_escaped "$THREADS_FILE" "$THREADS_MAX_BYTES" \
+  "prior review comments truncated; read the rest with gh pr view"
 
 DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
 {
@@ -362,6 +465,11 @@ done
 # because inline comments and the round's verdict are separate review objects.
 LAST_REVIEW_JQ='[.[][] | select(.user.login == "claude[bot]") | select(.submitted_at != null) | {commit_id, submitted_at}] | sort_by(.submitted_at) | last | (.commit_id // "")'
 LAST_SHA=$(printf '%s' "$REVIEWS" | jq -s -r "$LAST_REVIEW_JQ" 2>/dev/null) || LAST_SHA=''
+# Lines this block spends, which the full diff below subtracts from the shared budget.
+# It stays 0 on every path that renders no patch -- cycle 1, a rebase, a failed fetch
+# -- so the full diff gets the whole budget exactly as it did before there was a
+# since-diff to share with.
+SINCE_USED=0
 if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" != "null" ] && [ "$LAST_SHA" != "$HEAD_SHA" ]; then
   SINCE_FILE="${RUNNER_TEMP}/since-last-review.diff"
   # The compare API, not git: the checkout is fetch-depth 1, so no base branch and
@@ -385,6 +493,8 @@ if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" != "null" ] && [ "$LAST_SHA" != "$HEAD_SH
     # awk, not `wc -l`: wc pads its count with spaces on BSD and the number
     # is interpolated into the notice below, not just compared.
     SINCE_LINES=$(awk 'END {print NR}' "$SINCE_FILE")
+    SINCE_USED=$SINCE_LINES
+    if [ "$SINCE_USED" -gt "$SINCE_MAX" ]; then SINCE_USED=$SINCE_MAX; fi
     {
       echo
       echo "## Diff since your last review (${LAST_SHA} to ${HEAD_SHA})"
@@ -406,6 +516,12 @@ if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" != "null" ] && [ "$LAST_SHA" != "$HEAD_SH
   fi
 fi
 
+# Whatever the since-diff left of the shared budget, bounded above by DIFF_MAX so a PR
+# with no since-diff renders exactly what it always did. SINCE_MAX keeps the
+# subtraction from reaching zero; see DIFF_BUDGET_LINES above.
+FULL_DIFF_MAX=$((DIFF_BUDGET_LINES - SINCE_USED))
+if [ "$FULL_DIFF_MAX" -gt "$DIFF_MAX" ]; then FULL_DIFF_MAX=$DIFF_MAX; fi
+
 DIFF_FILE="${RUNNER_TEMP}/pr.diff"
 if fetch_raw "$DIFF_FILE" pr diff "$PR_NUMBER" --repo "$REPO"; then
   DIFF_LINES=$(awk 'END {print NR}' "$DIFF_FILE")
@@ -419,9 +535,9 @@ if fetch_raw "$DIFF_FILE" pr diff "$PR_NUMBER" --repo "$REPO"; then
       echo "The diff came back empty. That is unusual for a pull request; treat it"
       echo "as missing rather than as \"nothing changed\" and run gh pr diff."
     else
-      head -n "$DIFF_MAX" "$DIFF_FILE"
-      if [ "$DIFF_LINES" -gt "$DIFF_MAX" ]; then
-        echo "(truncated: first ${DIFF_MAX} of ${DIFF_LINES} lines; run gh pr diff for the rest)"
+      head -n "$FULL_DIFF_MAX" "$DIFF_FILE"
+      if [ "$DIFF_LINES" -gt "$FULL_DIFF_MAX" ]; then
+        echo "(truncated: first ${FULL_DIFF_MAX} of ${DIFF_LINES} lines; run gh pr diff for the rest)"
       fi
     fi
   } >> "$CTX"
@@ -447,7 +563,7 @@ fi
 # final size is known rather than assumed. The per-block caps above still matter -- they
 # decide *what* survives truncation, and they keep any one block from arriving here
 # having already crowded out the diff -- but this is what makes the total fit.
-THREADS_BYTES=$(wc -c < "$THREADS_FILE" | tr -d " ")
+THREADS_BYTES=$(escaped_bytes "$THREADS_FILE")
 CTX_MAX_BYTES=$((PROMPT_BUDGET - THREADS_BYTES))
 # Unreachable while THREADS_MAX_BYTES is clamped to half the budget. Kept because the
 # alternative if that clamp is ever loosened is `head -c` with a negative count, and an
@@ -462,11 +578,19 @@ fi
 # author-controlled, and this is the file they land in.
 strip_block_tags < "$CTX" > "$CTX.stripped"
 mv "$CTX.stripped" "$CTX"
-if [ "$(wc -c < "$CTX" | tr -d " ")" -gt "$CTX_MAX_BYTES" ]; then
-  echo "::warning::Review context exceeded ${CTX_MAX_BYTES} bytes and was truncated."
+CTX_ESCAPED=$(escaped_bytes "$CTX")
+if [ "$CTX_ESCAPED" -gt "$CTX_MAX_BYTES" ]; then
+  # A notice rather than a warning. No line cap bounds bytes: 3,000 lines of prose is
+  # about 60 KB escaped and 3,000 lines of dashboard JSON about 200 KB, so a
+  # generated-file PR reaches this legitimately and often, and a warning that cried
+  # regression every time would stop being read. It is here so an operator reading a
+  # thin review can see the context was cut and by how much -- and so a budget that
+  # starts firing on ordinary prose PRs, which would mean something really did
+  # regress, is visible rather than silent.
+  echo "::notice::Review context reached ${CTX_ESCAPED} escaped bytes against a ${CTX_MAX_BYTES} byte budget and was truncated to fit the review prompt."
 fi
-cap_file "$CTX" "$CTX_MAX_BYTES" \
-  "context truncated at ${CTX_MAX_BYTES} bytes; read what is missing with gh pr diff and gh pr view"
+cap_file_escaped "$CTX" "$CTX_MAX_BYTES" \
+  "context truncated to fit the review prompt; read what is missing with gh pr diff and gh pr view"
 
 CTX_DELIMITER="PR_CONTEXT_$(openssl rand -hex 16)"
 {

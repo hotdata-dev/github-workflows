@@ -167,6 +167,10 @@ case "$args" in
       *vnd.github.diff*)
         require_escape_flag "$args"
         printf 'diff --git a/api/app.py b/api/app.py\n+incremental change\n'
+        # Padding, so the since-diff can be made to compete with the full diff for the
+        # shared line budget. Tagged distinctly from the full diff's "+line" so a test
+        # can tell which block a rendered line came from.
+        awk -v n="$STUB_SINCE_LINES" 'BEGIN { for (i = 1; i <= n; i++) print "+since " i }'
         ;;
       *)
         printf '{"status":"%s","ahead_by":2,"behind_by":0}\n' "$COMPARE_STATUS"
@@ -180,8 +184,18 @@ case "$args" in
     # 12-byte opening tag to a 19-byte placeholder, so this is the one input shape that
     # makes the emitted output larger than the file the cap measured. Padding text cannot
     # reach it: the substitution has to fire.
-    awk -v n="$STUB_DIFF_LINES" -v tagged="$STUB_DIFF_TAGS" 'BEGIN {
-      for (i = 1; i <= n; i++) print (tagged == "1" ? "+<pr_context> line " i : "+line " i)
+    #
+    # STUB_DIFF_STYLE=json emits the shape that broke production: a Grafana dashboard
+    # patch, which is quotes and escaped quotes almost end to end. It costs about 1.20x
+    # once JSON-escaped where prose costs 1.02x, so a total measured raw lets it through
+    # and a total measured escaped does not.
+    awk -v n="$STUB_DIFF_LINES" -v tagged="$STUB_DIFF_TAGS" -v style="$STUB_DIFF_STYLE" 'BEGIN {
+      for (i = 1; i <= n; i++) {
+        if (tagged == "1") print "+<pr_context> line " i;
+        else if (style == "json")
+          printf "+      \"description\": \"line %d, \\\"quoted\\\" text\",\n", i;
+        else print "+line " i;
+      }
     }'
     ;;
   *) echo "gh stub: unhandled args: $args" >&2; exit 1 ;;
@@ -211,6 +225,8 @@ run_step() {
     STUB_THREAD_COMMENTS="${STUB_THREAD_COMMENTS:-0}" \
     STUB_DIFF_LINES="${STUB_DIFF_LINES:-40}" \
     STUB_DIFF_TAGS="${STUB_DIFF_TAGS:-0}" \
+    STUB_DIFF_STYLE="${STUB_DIFF_STYLE:-plain}" \
+    STUB_SINCE_LINES="${STUB_SINCE_LINES:-0}" \
     FAIL_ENDPOINT="${FAIL_ENDPOINT:-none}" \
     HEAD_SHA="${HEAD_SHA:-1d01475432236aa4fbca722aaaa2687c2b2e4947}" \
     BASE_REF=main \
@@ -243,6 +259,21 @@ THREADS_FILE_OUT="$WORK/threads.txt"
 # as one environment string, so this bounds everything this step emits into it. Defined up
 # here because more than one assertion below is about it.
 PROMPT_ARG_LIMIT=131072
+# The prompt is not carried as written. claude-code-action's action.yml sets
+# `ALL_INPUTS: toJson(inputs)` on the step it runs, so the whole prompt is carried a second
+# time, JSON-escaped, in one environment variable -- and the escaped copy, being the larger
+# of the two, is what reaches MAX_ARG_STRLEN first. Every total below is therefore measured
+# escaped. A Grafana dashboard PR is why: 123,401 raw bytes, inside the limit, and 135,366
+# escaped, and it failed on two consecutive pushes. A raw total does not see it.
+#
+# The expansion is not a factor that could be folded in: prose costs about 1.02x and a
+# quote-dense JSON diff about 1.20x.
+escaped_of() {
+  jq -Rs . < "$1" | wc -c | tr -d ' '
+}
+# What toJson(inputs) serializes beside the prompt: 38 further inputs, 1,356 bytes on the run
+# that failed. Same variable, same limit. Rounded up.
+ALL_INPUTS_OTHER_BYTES=2000
 context() {
   cat "$CTX_FILE"
 }
@@ -480,9 +511,11 @@ done
 
 # --- Truncation --------------------------------------------------------------------------
 
+# 2998, not 3000: the stub's since-diff is two lines, and the two diff blocks share one
+# 3,000-line budget rather than holding independent caps. See the shared-budget section below.
 expect "$(STUB_DIFF_LINES=4000 run_step)" "0" "step exits 0 on an oversized diff"
-expect_context '\(truncated: first 3000 of 4000 lines' "oversized diff truncated with a notice"
-expect "$(grep -c '^+line ' "$CTX_FILE")" "3000" "truncated diff carries exactly the cap"
+expect_context '\(truncated: first 2998 of 4000 lines' "oversized diff truncated with a notice"
+expect "$(grep -c '^+line ' "$CTX_FILE")" "2998" "truncated diff carries exactly the cap"
 
 # An empty body under a heading is a claim: "## Full diff" with nothing beneath it reads as
 # "nothing changed", and the reviewer has been told not to re-fetch what it was given. The
@@ -503,15 +536,15 @@ expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when the context exceeds the 
 # less the wrapper, the prompt document and the threads block -- so asserting a literal here
 # would pin a number that is no longer a constant, and pin it to whichever value happened to
 # ship. What has to hold is that the notice is present and names a figure.
-expect_context '\(context truncated at [0-9]+ bytes' \
+expect_context '\(context truncated to fit the review prompt' \
   "the truncation notice survives the truncation"
 expect_context '^## Full diff' "the diff block survives the truncation"
 expect_context '^\+line 1$' "the diff body survives the truncation"
 expect_context '^## CI checks' "the CI block survives the truncation"
 # The assertion this replaces allowed 210000 bytes, which was above the limit the prompt is
 # actually bounded by -- it would have passed on a context that could not be handed to the
-# reviewer at all. The bound is the argument limit.
-expect "$(wc -c < "$CTX_FILE" | tr -d ' ' \
+# reviewer at all. Measured escaped, because that is the copy the limit applies to.
+expect "$(escaped_of "$CTX_FILE" \
   | awk -v lim="$PROMPT_ARG_LIMIT" '{print ($1 <= lim) ? "capped" : "over"}')" \
   "capped" "the rendered context stays inside the argument limit"
 
@@ -582,6 +615,31 @@ reviews|prior reviews could not be read
 comments|prior inline review comments could not be read
 ENDPOINTS
 
+# --- The two diff blocks share one line budget --------------------------------------------
+
+# They overlap by construction: the since-last-review diff is a subset of the full diff, and
+# on a single-file PR it is very nearly the whole of it. Independent caps let the pair reach
+# DIFF_MAX + SINCE_MAX = 5,000 lines of largely the same patch -- 42 KB of "since your last
+# review" on top of 66 KB of "full diff" on the dashboard PR that failed. The budget bounds
+# what that costs, but every line the duplicate spends is a line the rest of the context does
+# not get.
+#
+# The since-diff keeps its share, because on cycle 2+ what changed since the last round is
+# the reviewer's subject; the full diff yields, and its notice says how to get the rest.
+STUB_SINCE_LINES=2500 STUB_DIFF_LINES=3000 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when both diff blocks are oversized"
+since_rendered=$(awk '/^\+since /' "$CTX_FILE" | wc -l | tr -d ' ')
+full_rendered=$(awk '/^\+line /' "$CTX_FILE" | wc -l | tr -d ' ')
+# 1998 of the since-diff's 2,000-line share, the other two lines being its header and the
+# "+incremental change" body line; 1,000 for the full diff, which is what the shared 3,000
+# leaves it.
+expect "$since_rendered" "1998" "the since-diff keeps its full share of the budget"
+expect "$full_rendered" "1000" "the full diff takes only what the since-diff left"
+expect "$((since_rendered + full_rendered))" "2998" \
+  "the two diff blocks together stay inside the shared budget"
+expect_context '\(truncated: first 1000 of 3000 lines; run gh pr diff for the rest\)' \
+  "the reduced full diff says how much it is showing and how to get the rest"
+
 # --- The assembled prompt fits in one environment string ----------------------------------
 #
 # Both of this step's outputs are interpolated into the same `prompt:` value, and the review
@@ -603,7 +661,7 @@ WRAPPER_BYTES=$(
     | sed -E 's/\$\{\{[^}]*\}\}//g' \
     | wc -c | tr -d ' '
 )
-STATIC_PROMPT_BYTES=$(wc -c < docs/claude-pr-review-prompt.md | tr -d ' ')
+STATIC_PROMPT_BYTES=$(escaped_of docs/claude-pr-review-prompt.md)
 
 if [ "$WRAPPER_BYTES" -lt 100 ]; then
   echo "FAIL could not measure the prompt wrapper out of $WORKFLOW (got $WRAPPER_BYTES bytes)" >&2
@@ -636,24 +694,26 @@ STUB_THREAD_COMMENTS=60 STUB_CONVO_COMMENTS=60 STUB_DIFF_LINES=4000 \
   run_step > "$WORK/code.txt"
 expect "$(cat "$WORK/code.txt")" "0" "step exits 0 with every input oversized at once"
 
-threads_bytes=$(wc -c < "$THREADS_FILE_OUT" | tr -d ' ')
-ctx_bytes=$(wc -c < "$CTX_FILE" | tr -d ' ')
-prompt_bytes=$((threads_bytes + ctx_bytes + WRAPPER_BYTES + STATIC_PROMPT_BYTES))
+threads_bytes=$(escaped_of "$THREADS_FILE_OUT")
+ctx_bytes=$(escaped_of "$CTX_FILE")
+prompt_bytes=$((threads_bytes + ctx_bytes + WRAPPER_BYTES + STATIC_PROMPT_BYTES \
+  + ALL_INPUTS_OTHER_BYTES))
 
 if [ "$prompt_bytes" -le "$PROMPT_ARG_LIMIT" ]; then
   echo "ok   assembled prompt fits MAX_ARG_STRLEN with every input oversized" \
     "($prompt_bytes <= $PROMPT_ARG_LIMIT)"
 else
   echo "FAIL assembled prompt exceeds MAX_ARG_STRLEN with every input oversized:"
-  printf '     threads %s + context %s + wrapper %s + prompt doc %s = %s, limit %s\n' \
+  printf '     threads %s + context %s + wrapper %s + prompt doc %s + other inputs %s = %s, limit %s\n' \
     "$threads_bytes" "$ctx_bytes" "$WRAPPER_BYTES" "$STATIC_PROMPT_BYTES" \
-    "$prompt_bytes" "$PROMPT_ARG_LIMIT"
+    "$ALL_INPUTS_OTHER_BYTES" "$prompt_bytes" "$PROMPT_ARG_LIMIT"
   failures=$((failures + 1))
 fi
 
 # Truncating silently would be worse than truncating: the reviewer would report on a diff it
 # never saw, with no way to know it had not seen it.
-expect_context 'context truncated at' "an over-budget context says it was truncated"
+expect_context 'context truncated to fit the review prompt' \
+  "an over-budget context says it was truncated"
 
 # The diff has to keep room. A long enough review history could otherwise spend the whole
 # budget on prior comments and leave the reviewer with nothing to review -- which is why the
@@ -676,8 +736,8 @@ STUB_THREAD_COMMENTS=60 STUB_CONVO_COMMENTS=60 STUB_DIFF_LINES=4000 STUB_DIFF_TA
   run_step > "$WORK/code.txt"
 expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when the context is dense with block tags"
 
-tagged_bytes=$(( $(wc -c < "$THREADS_FILE_OUT" | tr -d ' ') \
-  + $(wc -c < "$CTX_FILE" | tr -d ' ') + WRAPPER_BYTES + STATIC_PROMPT_BYTES ))
+tagged_bytes=$(( $(escaped_of "$THREADS_FILE_OUT") + $(escaped_of "$CTX_FILE") \
+  + WRAPPER_BYTES + STATIC_PROMPT_BYTES + ALL_INPUTS_OTHER_BYTES ))
 if [ "$tagged_bytes" -le "$PROMPT_ARG_LIMIT" ]; then
   echo "ok   assembled prompt fits MAX_ARG_STRLEN when block-tag substitution grows the text" \
     "($tagged_bytes <= $PROMPT_ARG_LIMIT)"
@@ -687,6 +747,31 @@ else
     "$tagged_bytes" "$PROMPT_ARG_LIMIT"
   failures=$((failures + 1))
 fi
+
+# The shape a raw total cannot see. Every line here is quotes and escaped quotes -- a
+# dashboard patch -- so the context passes a raw cap sized for prose and the escaped copy
+# toJson(inputs) makes still does not fit. This is the case that took the review down twice
+# on one pull request, with a prompt of 123,401 raw bytes and 135,366 escaped.
+STUB_DIFF_STYLE=json STUB_DIFF_LINES=3000 STUB_SINCE_LINES=2500 STUB_THREAD_COMMENTS=60 \
+  STUB_CONVO_COMMENTS=60 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a quote-dense diff at every cap"
+json_bytes=$(( $(escaped_of "$THREADS_FILE_OUT") + $(escaped_of "$CTX_FILE") \
+  + WRAPPER_BYTES + STATIC_PROMPT_BYTES + ALL_INPUTS_OTHER_BYTES ))
+if [ "$json_bytes" -le "$PROMPT_ARG_LIMIT" ]; then
+  echo "ok   assembled prompt fits MAX_ARG_STRLEN on a quote-dense diff" \
+    "($json_bytes <= $PROMPT_ARG_LIMIT)"
+else
+  echo "FAIL a quote-dense diff pushed the assembled prompt past MAX_ARG_STRLEN:"
+  printf '     %s escaped bytes, limit %s -- raw bytes alone do not bound this\n' \
+    "$json_bytes" "$PROMPT_ARG_LIMIT"
+  failures=$((failures + 1))
+fi
+# Truncating to fit must not cost the blocks the reviewer cannot cheaply rebuild. The cut
+# keeps the head of the context, so the block ordering is the real mechanism and the byte
+# cut is only the backstop.
+expect_context '^## CI checks' "the CI block survives the escaped-byte cap"
+expect_context '^## Changed files' "the changed-file list survives the escaped-byte cap"
+expect_context '^## Diff since your last review \(' "the since-diff survives the escaped-byte cap"
 
 # And nothing may survive the cut as a live tag. Stripping before the cap is what
 # guarantees it: a truncation can bisect `[block tag removed]`, which is inert, but it
