@@ -147,20 +147,26 @@ fi
 # line has no length limit, so a base64 or JSON dump next to the first error marker
 # would otherwise consume the whole context ahead of the diff.
 #
-# Two caps, because a per-excerpt one does not bound the set. FAILING_JOBS_JQ takes
-# three jobs and each writes two excerpts -- a summary and a window -- so 40000 apiece
-# is a 240 KB ceiling on log text, twice PROMPT_BUDGET, and all of it ordered above
-# `## Full diff`. The byte cap cuts from the tail, so the diff is the block that pays:
-# three verbose failing jobs took it out of the context entirely. 40000 was sized
-# against the old 200 KB context cap and is the one per-block cap the budget left
-# stale, so it is scaled off PROMPT_BUDGET like THREADS_MAX_BYTES and the excerpts
-# share one allowance between them.
+# One allowance for all of them, because a per-excerpt cap does not bound the set.
+# FAILING_JOBS_JQ takes three jobs and each writes two excerpts -- a summary and a
+# window -- so the old 40000 apiece was a 240 KB ceiling on log text, twice
+# PROMPT_BUDGET, and all of it ordered above `## Full diff`. The byte cap cuts from the
+# tail, so the diff is the block that paid: three verbose failing jobs took it out of
+# the context entirely. 40000 was sized against the old 200 KB context cap, so the
+# allowance is scaled off PROMPT_BUDGET like THREADS_MAX_BYTES instead. It is not also
+# kept as a per-excerpt cap: a quarter of the budget is around 30 KB, so 40000 could
+# never be the binding number and stating it would only imply a second bound that does
+# not exist.
 LOG_BUDGET=$((PROMPT_BUDGET / 4))
-LOG_MAX_BYTES=40000
-if [ "$LOG_MAX_BYTES" -gt "$LOG_BUDGET" ]; then
-  LOG_MAX_BYTES=$LOG_BUDGET
-fi
 LOG_REMAINING=$LOG_BUDGET
+# What the summary may take of it. The excerpts are written summary first, window
+# second, but the window is the block worth more: across five real failed job logs the
+# cause sat immediately above the first ##[error] in four, and the summary is what
+# covers the fifth. Sharing an allowance first-come-first-served would invert that --
+# `tail -n 20` bounds the summary in lines, not bytes, so twenty stack-trace or JSON
+# lines take everything and the window for the same job renders as its own truncation
+# notice. Held to a quarter so the window keeps the larger share of whatever is left.
+LOG_SUMMARY_MAX=$((LOG_BUDGET / 4))
 # The truncation notices, as constants rather than literals at their call sites. The
 # prompt document quotes them and tells the reviewer that seeing one means the block is
 # incomplete and the rest has to be fetched before drawing conclusions from it -- so a
@@ -195,17 +201,17 @@ cap_file() {
   fi
 }
 
-# cap_log_excerpt <file> <notice> -- cap one log excerpt against what is left of the
-# shared allowance, then charge what it emitted against that allowance. Both bounds in
-# one place, because the per-excerpt one is what a reader checks and the total is what
-# actually protects the diff. Charging the size *after* the cap counts the notice line
-# too, so the excerpts cannot overspend by announcing themselves.
+# cap_log_excerpt <file> <notice> [max] -- cap one log excerpt against what is left of
+# the shared allowance, then charge what it emitted against that allowance. Charging the
+# size *after* the cap counts the notice line too, so the excerpts cannot overspend by
+# announcing themselves. [max] is an optional ceiling for callers that must not take the
+# whole of what is left; without it an excerpt may.
 #
 # A later job can be cut to nothing this way, which is the intended order: the first
 # failing job is the one whose cause is usually being read, and an excerpt reduced to
 # its truncation notice still tells the reviewer the log exists and was not empty.
 cap_log_excerpt() {
-  local limit=$LOG_MAX_BYTES
+  local limit=${3:-$LOG_REMAINING}
   if [ "$LOG_REMAINING" -lt "$limit" ]; then limit=$LOG_REMAINING; fi
   if [ "$limit" -lt 1 ]; then
     # Not cap_file with a zero limit: `head -c 0` is an error on BSD head rather than an
@@ -479,7 +485,7 @@ for JOB_ID in $JOB_IDS; do
   if [ -n "$SUMMARY" ]; then
     EXCERPT="${RUNNER_TEMP}/job-${JOB_ID}-summary.txt"
     printf '%s\n' "$SUMMARY" > "$EXCERPT"
-    cap_log_excerpt "$EXCERPT" "${NOTICE_LOG}: summary lines"
+    cap_log_excerpt "$EXCERPT" "${NOTICE_LOG}: summary lines" "$LOG_SUMMARY_MAX"
     { echo "Summary lines:"; cat "$EXCERPT"; echo; } >> "$CTX"
   fi
   # The *first* error marker: later steps in the same job add their own, and the

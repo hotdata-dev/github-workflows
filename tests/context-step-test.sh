@@ -670,6 +670,28 @@ fi
 expect_context '^## Full diff' "the diff block survives three jobs of enormous logs"
 expect_context '^\+line 1$' "the diff body survives three jobs of enormous logs"
 
+# Sharing a budget decides *what* the excerpts spend it on, and the region total above cannot
+# see that. The summary is written first and the first-error window second, but the window is
+# the block worth the most: across five real failed logs the cause sat immediately above the
+# first ##[error] in four of them, and the summary exists for the fifth. `tail -n 20` bounds
+# the summary in lines, not bytes, and a CI log line has no length limit -- the premise this
+# file already states about the window -- so twenty stack-trace or JSON-body lines are enough
+# for the summary to take the whole allowance and leave the window as nothing but its own
+# truncation notice. FAT_LOG is exactly that log: all 201 lines match LOG_SUMMARY_RE.
+window_bytes=$(awk '
+  /^Log lines [0-9]+-[0-9]+, ending at the first error:$/ { if (!seen) { seen = 1; inwin = 1; next } }
+  inwin && /^#/ { exit }
+  inwin' "$CTX_FILE" | wc -c | tr -d ' ')
+# Comfortably more than the ~60-byte notice a starved excerpt renders, and far less than the
+# window's real share -- the assertion is "the window got log text", not a size.
+if [ "$window_bytes" -gt 1000 ]; then
+  echo "ok   the first-error window keeps a share against a fat summary ($window_bytes bytes)"
+else
+  echo "FAIL the summary spent the allowance and the first-error window came out empty:"
+  printf '     %s bytes of window text for the first failing job\n' "$window_bytes"
+  failures=$((failures + 1))
+fi
+
 # --- Degradation --------------------------------------------------------------------------
 
 # Every endpoint failing individually has to leave the step green *and* say what is
