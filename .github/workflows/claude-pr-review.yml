@@ -277,7 +277,30 @@ jobs:
           # norm strips the wrappers the reviewer puts in front of a real command (timeout,
           # cd .. &&, env VAR=x) so they do not all collapse into "other". verb returns the
           # first matching label or "other" -- the output is always one of these literals.
-          CMD_JQ='def norm: sub("^\\s+"; "") | sub("^timeout\\s+[0-9]+m?\\s+"; "") | sub("^cd\\s+[^&|;]+&&\\s*"; "") | sub("^env\\s+\\S+=\\S+\\s+"; ""); def verb: . as $c | ([[["^gh\\s+pr\\s+diff", "gh pr diff"], ["^gh\\s+pr\\s+view", "gh pr view"], ["^gh\\s+pr\\s+checks", "gh pr checks"], ["^gh\\s+pr\\s+review", "gh pr review"], ["^gh\\s+pr\\s+comment", "gh pr comment"], ["^gh\\s+api", "gh api"], ["^gh\\s", "gh other"], ["^git\\s+diff", "git diff"], ["^git\\s+log", "git log"], ["^git\\s+show", "git show"], ["^git\\s+blame", "git blame"], ["^git\\s", "git other"], ["^rg\\b", "rg"], ["^grep\\b", "grep"], ["^(fd|find)\\b", "find"], ["^(ls|tree)\\b", "ls"], ["^(sed|awk)\\b", "sed/awk"], ["^(cat|head|tail|wc)\\b", "cat/head/tail"], ["^(pytest|uv|python3?|cargo|npm|pnpm|yarn|bun|node|go|make|ruff|mypy|pyflakes)\\b", "run tests/build"]][] | select(.[0] as $re | $c | test($re))] | .[0] // ["", "other"]) | .[1]; def unquoted: gsub("\"[^\"]*\""; "") | gsub("\u0027[^\u0027]*\u0027"; ""); def classify: {cmd: (norm | verb), compound: (unquoted | test("\\||&&|;|>"))}; def toolname: if type == "string" and test("^[A-Za-z0-9_-]{1,64}$") then . else "unknown" end;'
+          CMD_JQ='def norm: sub("^\\s+"; "") | sub("^timeout\\s+[0-9]+m?\\s+"; "") | sub("^cd\\s+[^&|;]+&&\\s*"; "") | sub("^env\\s+\\S+=\\S+\\s+"; ""); def verb: . as $c | ([[["^gh\\s+pr\\s+diff", "gh pr diff"], ["^gh\\s+pr\\s+view", "gh pr view"], ["^gh\\s+pr\\s+checks", "gh pr checks"], ["^gh\\s+pr\\s+review", "gh pr review"], ["^gh\\s+pr\\s+comment", "gh pr comment"], ["^gh\\s+api", "gh api"], ["^gh\\s", "gh other"], ["^git\\s+diff", "git diff"], ["^git\\s+log", "git log"], ["^git\\s+show", "git show"], ["^git\\s+blame", "git blame"], ["^git\\s", "git other"], ["^rg\\b", "rg"], ["^grep\\b", "grep"], ["^(fd|find)\\b", "find"], ["^(ls|tree)\\b", "ls"], ["^(sed|awk)\\b", "sed/awk"], ["^(cat|head|tail|wc)\\b", "cat/head/tail"], ["^(pytest|uv|python3?|cargo|npm|pnpm|yarn|bun|node|go|make|ruff|mypy|pyflakes)\\b", "run tests/build"]][] | select(.[0] as $re | $c | test($re))] | .[0] // ["", "other"]) | .[1]; def unquoted: gsub("\"[^\"]*\""; "") | gsub("\u0027[^\u0027]*\u0027"; ""); def classify: {cmd: (norm | verb), compound: (unquoted | test("\\||&&|;|>")), has_subst: test("`|\\$\\(")}; def toolname: if type == "string" and test("^[A-Za-z0-9_-]{1,64}$") then . else "unknown" end;'
+          #
+          # has_subst is the same kind of flag for the denials that outlived the frontloaded
+          # context. Reads mostly stopped being refused once the context arrived in the prompt
+          # -- denials fell from 5.2 a run to 0.5 -- and what is left is the *write* path:
+          # `gh pr review` is allowlisted and still refused on 29% of its 241 attempts across
+          # 170 settled-window runs and 8 repos, 1.6 times per affected run before the review
+          # lands, costing those runs +$0.46 and +73s each (issue #33). compound reported 1 of
+          # those 71, which is the point: it cannot see this. The standing hypothesis is the
+          # review body rather than the command -- a body is markdown, and a backtick inside a
+          # double-quoted argument is command substitution to anything parsing shell. So the
+          # flag is tested against the *raw* command, not the unquoted form compound uses:
+          # stripping quoted spans first would remove precisely the backticks in question. It
+          # rides on `commands` as well as `denied_commands` because a denial rate needs its
+          # base rate to mean anything. Boolean, like compound: a label, never a span of the
+          # command.
+          #
+          # This shipped once before, in #26, and was reverted in 8b04393 -- not on its own
+          # merits: #26 pushed the *context* step's run block to 22,016 characters, past the
+          # 21,000-character expression limit, and the revert took this with it. #29 then moved
+          # that step out to scripts/gather-review-context.sh, so the budget that forced the
+          # revert is gone. The step below is 3.3k with the flag; the guard in
+          # tests/workflow-lint-test.sh now fails before a run block can reach the limit again.
+          #
           # commands and denied_commands answer two different questions: what the reviewer
           # spends its Bash budget on, and which of those the allowlist refuses. compound is
           # carried separately because an allowlisted command still gets denied when it is
@@ -285,7 +308,7 @@ jobs:
           # tested against the command with quoted spans removed, because `rg -n \"a|b\"` is
           # one allowlisted command and counting its alternation as a pipe would inflate
           # exactly the number the flag exists to produce.
-          TOOL_USAGE_JQ='{tool_calls: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name | toolname] | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), commands: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | (.input.command // "") | classify] | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), denials: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(.tool_name | toolname) | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), denied_commands: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(select(.tool_name == "Bash") | (.tool_input.command // "") | classify) | group_by([.cmd, .compound]) | map({cmd: .[0].cmd, compound: .[0].compound, n: length}) | sort_by(-.n)), result: (([.[]? | select(.type=="result")] | last // {}) | {subtype, is_error, num_turns, duration_ms, total_cost_usd})}'
+          TOOL_USAGE_JQ='{tool_calls: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name | toolname] | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), commands: ([.[]? | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | (.input.command // "") | classify] | group_by([.cmd, .compound, .has_subst]) | map({cmd: .[0].cmd, compound: .[0].compound, has_subst: .[0].has_subst, n: length}) | sort_by(-.n)), denials: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(.tool_name | toolname) | group_by(.) | map({name: .[0], n: length}) | sort_by(-.n)), denied_commands: (([.[]? | select(.type=="result")] | last // {}) | (.permission_denials // []) | map(select(.tool_name == "Bash") | (.tool_input.command // "") | classify) | group_by([.cmd, .compound, .has_subst]) | map({cmd: .[0].cmd, compound: .[0].compound, has_subst: .[0].has_subst, n: length}) | sort_by(-.n)), result: (([.[]? | select(.type=="result")] | last // {}) | {subtype, is_error, num_turns, duration_ms, total_cost_usd})}'
           jq "$CMD_JQ $TOOL_USAGE_JQ" "$EXECUTION_FILE" > "${RUNNER_TEMP}/claude-tool-usage.json"
         env:
           # Via env, not a ${{ }} interpolation inside the script, so the path cannot be

@@ -246,6 +246,148 @@ else
   echo "ok   the smoke job grants exactly what the review job declares"
 fi
 
+# Actions evaluates a `run:` block as a template, and the value it evaluates cannot exceed
+# 21,000 characters. Going over does not fail the step -- it fails the whole workflow at load
+# time, which is the same outage shape as the empty expression above: no jobs, the required
+# check never reports, every open pull request in the org blocks.
+#
+# This has already happened once. #26 pushed the context step to 22,016 characters and had to
+# be reverted (8b04393), which took an unrelated tool-usage flag down with it; #29 then moved
+# that step out to the context script. Nothing in the suite could see either the breach or how
+# close the file sat beforehand -- 20,545 characters, about eight comment lines of headroom.
+#
+# So the budget is 20,000, not 21,000: a block within a few comments of the ceiling is the
+# defect, because the next person adding a comment is the one who takes the org down. Blocks
+# over budget belong in scripts/ like the context step, not trimmed to fit.
+#
+# The measurement has to match what Actions counts, which is the block scalar's *value* --
+# indentation stripped. Counting raw lines overstates every block (the context step reads
+# 24,285 that way) and would make the budget meaningless. Implemented against the standard
+# library only: this is the check for the defect that caused an outage, so it cannot be the
+# one that skips when a YAML module is missing.
+RUN_BUDGET=20000
+SCANNER=$(mktemp)
+trap 'rm -f "$SCANNER" "$SCANNER.yml"' EXIT
+cat > "$SCANNER" <<'PY'
+import sys
+
+budget, paths = int(sys.argv[1]), sys.argv[2:]
+found = 0
+for path in paths:
+    with open(path) as fh:
+        lines = fh.readlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].rstrip("\n")
+        key = stripped.lstrip()
+        # `- run: |` is a run block too -- a step may put run first, with no name. Skipping it
+        # would leave the largest kind of block unmeasured while the check still reported ok,
+        # which is the failure this file exists to prevent. The list marker is part of the
+        # key's indentation: `      - run:` puts the step map at column 8, so content has to
+        # be indented past 8, not past 6.
+        while key.startswith("- "):
+            key = key[2:]
+        if key.startswith("run:"):
+            rest = key[4:].strip()
+            # Measured off the stripped key, so the list marker counts as indentation:
+            # `      - run:` gives 8, the column `run` actually sits at.
+            key_indent = len(stripped) - len(key)
+            start = i + 1
+            if not rest.startswith(("|", ">")):
+                # Single-line plain scalar: the value is the text, no trailing newline.
+                found += 1
+                size = len(rest)
+                i += 1
+            else:
+                i += 1
+                body, block_indent = [], None
+                while i < len(lines):
+                    raw = lines[i].rstrip("\n")
+                    if not raw.strip():             # blank lines belong to the block
+                        body.append("")
+                        i += 1
+                        continue
+                    indent = len(raw) - len(raw.lstrip())
+                    if indent <= key_indent:
+                        break
+                    if block_indent is None:
+                        block_indent = indent
+                    body.append(raw[block_indent:])
+                    i += 1
+                # Clip chomping: trailing blank lines collapse to the single closing newline.
+                while body and body[-1] == "":
+                    body.pop()
+                found += 1
+                # Exact for the `|` family, which is what every block over a few hundred
+                # characters here uses. A folded `>` joins lines with spaces, so this
+                # over-counts it by the newlines -- erring toward failing early, which is the
+                # safe direction for a budget.
+                size = len("\n".join(body) + "\n") if body else 0
+            if size >= budget:
+                print(f"{path}:{start}: run block is {size} characters, "
+                      f"budget {budget} (Actions rejects the workflow at 21000)")
+            continue
+        i += 1
+if not found:
+    print("NO-RUN-BLOCKS-FOUND")
+PY
+
+# The scanner is checked against known sizes before it is trusted on the real files. A
+# sentinel that only proves blocks were *found* cannot distinguish a correct measurement from
+# one that reads every block as zero -- and a budget check that always measures low reports ok
+# forever.
+#
+# All three shapes the scanner branches on appear here: `- run: |` with the run key first (this
+# was missed at first review and would have gone unmeasured with the check still green), the
+# same block under a `name:`, and a plain single-line `run:` -- which is the most common shape
+# in these files and the one branch that has no block-scalar logic to fall back on.
+#
+# Sizes are countable by eye, so the assertion needs no YAML parser to justify: two 9-character
+# lines plus their newlines is 20, one 10-character line plus its newline is 11, and a plain
+# scalar is its text with no trailing newline, so `echo hello` is 10.
+cat > "$SCANNER.yml" <<'YML'
+name: selftest
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          aaaaaaaaa
+          bbbbbbbbb
+      - name: named step
+        run: |
+          cccccccccc
+      - name: plain scalar
+        run: echo hello
+YML
+measured=$(python3 "$SCANNER" 1 "$SCANNER.yml" | sed 's/.*run block is \([0-9]*\) characters.*/\1/' | sort -n | tr '\n' ' ')
+if [ "$measured" != "10 11 20 " ]; then
+  echo "FAIL the run-block scanner mis-measures a known input: expected sizes '10 11 20 ', got"
+  echo "     '$measured' -- so the budget check below cannot be trusted"
+  failures=$((failures + 1))
+else
+  echo "ok   the run-block scanner measures all three run: shapes correctly"
+fi
+
+oversized=$(python3 "$SCANNER" "$RUN_BUDGET" "${WORKFLOWS[@]}") || {
+  echo "FAIL the run-block size scan itself failed; the budget check proves nothing"
+  failures=$((failures + 1))
+  oversized=""
+}
+if [ "$oversized" = "NO-RUN-BLOCKS-FOUND" ]; then
+  echo "FAIL the run-block scan found no run: blocks at all; the budget check proves nothing"
+  failures=$((failures + 1))
+elif [ -n "$oversized" ]; then
+  echo "FAIL a run: block is at or over the ${RUN_BUDGET}-character budget. Actions fails the"
+  echo "     whole workflow at 21000 -- no jobs, no required check, every org PR blocked."
+  echo "     Move the script to scripts/ rather than trimming comments to fit:"
+  printf '%s\n' "$oversized" | sed 's/^/       /'
+  failures=$((failures + 1))
+else
+  echo "ok   every run: block is under the ${RUN_BUDGET}-character budget"
+fi
+
 # The scan above is a backstop for one class. actionlint checks the schema, the expression
 # grammar, and the shell; run it when it is on PATH. shellcheck findings are excluded because
 # the run blocks here intentionally use unquoted word splitting for job ids.
