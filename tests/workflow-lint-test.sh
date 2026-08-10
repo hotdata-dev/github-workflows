@@ -335,9 +335,16 @@ PY
 # The scanner is checked against known sizes before it is trusted on the real files. A
 # sentinel that only proves blocks were *found* cannot distinguish a correct measurement from
 # one that reads every block as zero -- and a budget check that always measures low reports ok
-# forever. Both step shapes appear here, because the `- run:` form was missed at first review
-# and would have gone unmeasured with the check still green. Sizes are countable by eye: two
-# 9-character lines plus their newlines is 20, one 10-character line plus its newline is 11.
+# forever.
+#
+# All three shapes the scanner branches on appear here: `- run: |` with the run key first (this
+# was missed at first review and would have gone unmeasured with the check still green), the
+# same block under a `name:`, and a plain single-line `run:` -- which is the most common shape
+# in these files and the one branch that has no block-scalar logic to fall back on.
+#
+# Sizes are countable by eye, so the assertion needs no YAML parser to justify: two 9-character
+# lines plus their newlines is 20, one 10-character line plus its newline is 11, and a plain
+# scalar is its text with no trailing newline, so `echo hello` is 10.
 cat > "$SCANNER.yml" <<'YML'
 name: selftest
 on: push
@@ -351,14 +358,16 @@ jobs:
       - name: named step
         run: |
           cccccccccc
+      - name: plain scalar
+        run: echo hello
 YML
 measured=$(python3 "$SCANNER" 1 "$SCANNER.yml" | sed 's/.*run block is \([0-9]*\) characters.*/\1/' | sort -n | tr '\n' ' ')
-if [ "$measured" != "11 20 " ]; then
-  echo "FAIL the run-block scanner mis-measures a known input: expected sizes '11 20 ', got"
+if [ "$measured" != "10 11 20 " ]; then
+  echo "FAIL the run-block scanner mis-measures a known input: expected sizes '10 11 20 ', got"
   echo "     '$measured' -- so the budget check below cannot be trusted"
   failures=$((failures + 1))
 else
-  echo "ok   the run-block scanner measures both step shapes correctly"
+  echo "ok   the run-block scanner measures all three run: shapes correctly"
 fi
 
 oversized=$(python3 "$SCANNER" "$RUN_BUDGET" "${WORKFLOWS[@]}") || {
