@@ -51,10 +51,21 @@ them would otherwise end the data block early and land the rest where it reads a
 ### Tool usage artifact
 
 Each run attaches a `claude-tool-usage-pr-<number>` artifact (14-day retention): tool call counts,
-Bash command labels with a compound flag, the denied subset of both, and the run's turn count and
-cost. It exists to diagnose permission denials against the workflow's `--allowedTools` list, since
-the job log records only the number of denials, never what was refused. Tool names alone proved
-insufficient — 520 of 567 denials in the first week were `Bash`, which is every command there is.
+Bash command labels with a compound flag and a command-substitution flag, the denied subset of both,
+and the run's turn count and cost. It exists to diagnose permission denials against the workflow's
+`--allowedTools` list, since the job log records only the number of denials, never what was refused.
+Tool names alone proved insufficient — 520 of 567 denials in the first week were `Bash`, which is
+every command there is.
+
+The two flags are deliberately measured differently, and the difference is the point. `compound`
+strips quoted spans before looking for `| && ; >`, because `rg -n "a|b"` is one allowlisted command
+and counting its alternation as a pipe would inflate the number the flag exists to produce.
+`has_subst` tests the raw command for `` ` `` and `$(`, because the suspected trigger lives *inside*
+the quoted body: a review body is markdown, and a backtick in a double-quoted argument is command
+substitution to anything parsing shell. Frontloading the context fixed the read path — denials fell
+from 5.2 a run to 0.5 — but `gh pr review` is allowlisted and still refused on 29% of its 241
+attempts across 170 runs and 8 repos, at +$0.46 and +73s per affected run, with `compound` reporting
+1 of those 71. Measuring `has_subst` the same way as `compound` would have kept that invisible.
 
 The artifact is a projection of the action's execution log, never the log itself — that file is the
 full conversation, and the runner holds a git credential the reviewer can read, which artifacts
