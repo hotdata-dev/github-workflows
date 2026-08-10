@@ -266,7 +266,9 @@ fi
 # library only: this is the check for the defect that caused an outage, so it cannot be the
 # one that skips when a YAML module is missing.
 RUN_BUDGET=20000
-oversized=$(python3 - "$RUN_BUDGET" "${WORKFLOWS[@]}" <<'PY'
+SCANNER=$(mktemp)
+trap 'rm -f "$SCANNER" "$SCANNER.yml"' EXIT
+cat > "$SCANNER" <<'PY'
 import sys
 
 budget, paths = int(sys.argv[1]), sys.argv[2:]
@@ -278,8 +280,17 @@ for path in paths:
     while i < len(lines):
         stripped = lines[i].rstrip("\n")
         key = stripped.lstrip()
+        # `- run: |` is a run block too -- a step may put run first, with no name. Skipping it
+        # would leave the largest kind of block unmeasured while the check still reported ok,
+        # which is the failure this file exists to prevent. The list marker is part of the
+        # key's indentation: `      - run:` puts the step map at column 8, so content has to
+        # be indented past 8, not past 6.
+        while key.startswith("- "):
+            key = key[2:]
         if key.startswith("run:"):
             rest = key[4:].strip()
+            # Measured off the stripped key, so the list marker counts as indentation:
+            # `      - run:` gives 8, the column `run` actually sits at.
             key_indent = len(stripped) - len(key)
             start = i + 1
             if not rest.startswith(("|", ">")):
@@ -320,7 +331,37 @@ for path in paths:
 if not found:
     print("NO-RUN-BLOCKS-FOUND")
 PY
-) || {
+
+# The scanner is checked against known sizes before it is trusted on the real files. A
+# sentinel that only proves blocks were *found* cannot distinguish a correct measurement from
+# one that reads every block as zero -- and a budget check that always measures low reports ok
+# forever. Both step shapes appear here, because the `- run:` form was missed at first review
+# and would have gone unmeasured with the check still green. Sizes are countable by eye: two
+# 9-character lines plus their newlines is 20, one 10-character line plus its newline is 11.
+cat > "$SCANNER.yml" <<'YML'
+name: selftest
+on: push
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          aaaaaaaaa
+          bbbbbbbbb
+      - name: named step
+        run: |
+          cccccccccc
+YML
+measured=$(python3 "$SCANNER" 1 "$SCANNER.yml" | sed 's/.*run block is \([0-9]*\) characters.*/\1/' | sort -n | tr '\n' ' ')
+if [ "$measured" != "11 20 " ]; then
+  echo "FAIL the run-block scanner mis-measures a known input: expected sizes '11 20 ', got"
+  echo "     '$measured' -- so the budget check below cannot be trusted"
+  failures=$((failures + 1))
+else
+  echo "ok   the run-block scanner measures both step shapes correctly"
+fi
+
+oversized=$(python3 "$SCANNER" "$RUN_BUDGET" "${WORKFLOWS[@]}") || {
   echo "FAIL the run-block size scan itself failed; the budget check proves nothing"
   failures=$((failures + 1))
   oversized=""
