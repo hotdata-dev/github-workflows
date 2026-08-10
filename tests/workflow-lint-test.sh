@@ -246,6 +246,98 @@ else
   echo "ok   the smoke job grants exactly what the review job declares"
 fi
 
+# Actions evaluates a `run:` block as a template, and the value it evaluates cannot exceed
+# 21,000 characters. Going over does not fail the step -- it fails the whole workflow at load
+# time, which is the same outage shape as the empty expression above: no jobs, the required
+# check never reports, every open pull request in the org blocks.
+#
+# This has already happened once. #26 pushed the context step to 22,016 characters and had to
+# be reverted (8b04393), which took an unrelated tool-usage flag down with it; #29 then moved
+# that step out to the context script. Nothing in the suite could see either the breach or how
+# close the file sat beforehand -- 20,545 characters, about eight comment lines of headroom.
+#
+# So the budget is 20,000, not 21,000: a block within a few comments of the ceiling is the
+# defect, because the next person adding a comment is the one who takes the org down. Blocks
+# over budget belong in scripts/ like the context step, not trimmed to fit.
+#
+# The measurement has to match what Actions counts, which is the block scalar's *value* --
+# indentation stripped. Counting raw lines overstates every block (the context step reads
+# 24,285 that way) and would make the budget meaningless. Implemented against the standard
+# library only: this is the check for the defect that caused an outage, so it cannot be the
+# one that skips when a YAML module is missing.
+RUN_BUDGET=20000
+oversized=$(python3 - "$RUN_BUDGET" "${WORKFLOWS[@]}" <<'PY'
+import sys
+
+budget, paths = int(sys.argv[1]), sys.argv[2:]
+found = 0
+for path in paths:
+    with open(path) as fh:
+        lines = fh.readlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].rstrip("\n")
+        key = stripped.lstrip()
+        if key.startswith("run:"):
+            rest = key[4:].strip()
+            key_indent = len(stripped) - len(key)
+            start = i + 1
+            if not rest.startswith(("|", ">")):
+                # Single-line plain scalar: the value is the text, no trailing newline.
+                found += 1
+                size = len(rest)
+                i += 1
+            else:
+                i += 1
+                body, block_indent = [], None
+                while i < len(lines):
+                    raw = lines[i].rstrip("\n")
+                    if not raw.strip():             # blank lines belong to the block
+                        body.append("")
+                        i += 1
+                        continue
+                    indent = len(raw) - len(raw.lstrip())
+                    if indent <= key_indent:
+                        break
+                    if block_indent is None:
+                        block_indent = indent
+                    body.append(raw[block_indent:])
+                    i += 1
+                # Clip chomping: trailing blank lines collapse to the single closing newline.
+                while body and body[-1] == "":
+                    body.pop()
+                found += 1
+                # Exact for the `|` family, which is what every block over a few hundred
+                # characters here uses. A folded `>` joins lines with spaces, so this
+                # over-counts it by the newlines -- erring toward failing early, which is the
+                # safe direction for a budget.
+                size = len("\n".join(body) + "\n") if body else 0
+            if size >= budget:
+                print(f"{path}:{start}: run block is {size} characters, "
+                      f"budget {budget} (Actions rejects the workflow at 21000)")
+            continue
+        i += 1
+if not found:
+    print("NO-RUN-BLOCKS-FOUND")
+PY
+) || {
+  echo "FAIL the run-block size scan itself failed; the budget check proves nothing"
+  failures=$((failures + 1))
+  oversized=""
+}
+if [ "$oversized" = "NO-RUN-BLOCKS-FOUND" ]; then
+  echo "FAIL the run-block scan found no run: blocks at all; the budget check proves nothing"
+  failures=$((failures + 1))
+elif [ -n "$oversized" ]; then
+  echo "FAIL a run: block is at or over the ${RUN_BUDGET}-character budget. Actions fails the"
+  echo "     whole workflow at 21000 -- no jobs, no required check, every org PR blocked."
+  echo "     Move the script to scripts/ rather than trimming comments to fit:"
+  printf '%s\n' "$oversized" | sed 's/^/       /'
+  failures=$((failures + 1))
+else
+  echo "ok   every run: block is under the ${RUN_BUDGET}-character budget"
+fi
+
 # The scan above is a backstop for one class. actionlint checks the schema, the expression
 # grammar, and the shell; run it when it is on PATH. shellcheck findings are excluded because
 # the run blocks here intentionally use unquoted word splitting for job ids.
