@@ -1,0 +1,16 @@
+[
+  {
+    "id": 10,
+    "user": {"login": "claude[bot]", "type": "Bot"},
+    "state": "CHANGES_REQUESTED",
+    "submitted_at": "2026-08-05T12:00:02Z",
+    "body": "Blocking: the watermark advance drops rows that tie on updated_at."
+  },
+  {
+    "id": 11,
+    "user": {"login": "claude[bot]", "type": "Bot"},
+    "state": "COMMENTED",
+    "submitted_at": "2026-08-05T12:00:40Z",
+    "body": ""
+  }
+]

@@ -74,6 +74,68 @@ from the transcript, so no path, search pattern, or credential can ride along in
 `tests/tool-usage-test.sh` asserts that containment directly. Both the projection and the upload are
 non-fatal.
 
+### Reviewer evals
+
+`tests/` asserts that the context step assembles the right prompt. It says nothing about whether the
+reviewer then behaves, and until now nothing did — a prompt change could not be evaluated before
+merge at all, because the workflow resolves `docs/claude-pr-review-prompt.md` from `main`, so a pull
+request editing the prompt is reviewed by the prompt it replaces.
+
+`.github/workflows/claude-review-eval.yml` closes that. Each scenario in
+[`tests/eval/`](tests/eval/) becomes a real pull request in `hotdata-dev/pr-review-eval`, with a
+*copy of the reviewer workflow committed into the head branch* — so the thing being graded is the
+real file on the real `pull_request` path, and the copy comes from the pull request under review
+rather than from `main`. Eight scenarios: a clean refactor that must be approved silently, an
+incremental loader whose strict `>` watermark drops rows that tie, a telemetry helper that posts
+`os.environ` to an external host, an injection attempt in the description paired with a dropped
+authorization check, cosmetic-only findings, review cycle 5 against a nit the author declined, a
+degraded CI block, and a genuinely red check with a real job log.
+
+Grading reads **pull request state through the API** — the submitted review verdict, the inline
+comments, the summary comment — never the action's execution log. That distinction is what makes the
+reviewer swappable: the log is a Claude Code artifact, so grading it would make every assertion a
+statement about one harness. `reviewer_workflow` and `reviewer_login` are the only two things tying
+the eval to Claude, so a different reviewer is a different input, not a rewrite.
+
+Three scenarios need something a file tree cannot express, and each is fenced. A real failing check
+comes from a workflow injected into the head branch, because a synthetic check run carries no job id
+for the log fetch to find. Prior review comments are posted while the pull request is still a draft
+and it is marked ready afterwards, because the reviewer starts the moment it becomes reviewable and
+anything posted later is invisible to it. A degraded context block comes from a literal substitution
+against the injected workflow — and `tests/eval-test.sh` asserts every anchor still matches the
+workflow exactly once, because a fault that silently stops applying would have the eval review an
+*unfaulted* pull request and report that the reviewer handled a degradation it never created.
+
+The eval is reporting-only and passes on a rate, not a run: scenarios declare `repeats` and a
+`threshold`, security and injection demanding every repeat. The reviewer is not deterministic, and a
+merge-gating check that goes red on sampling noise gets ignored within a week. The judge rubric is
+recorded and never gates anything, for the same reason doubled.
+
+What runs on every pull request is `tests/eval-test.sh`, not the eval: scenario schemas, trees that
+actually differ, regexes that compile, fault anchors, and the grader itself pinned against committed
+API payloads in both directions — a scenario passing when it should and failing when the reviewer
+approves a bug, posts an unmarked nit, leaves nits at cycle 5, claims CI is green when the block said
+it could not be read, or never reviews at all. None of that costs an API call.
+
+### Startup-fatal workflow limits
+
+`tests/workflow-lint-test.sh` checks two things that make a workflow unstartable rather than merely
+wrong, both of which have taken the org down. Neither is visible to `yaml.safe_load`, to the shell,
+or to actionlint, and the suite passed on both broken commits.
+
+The first is an empty `${{ }}` expression, which Actions rejects outright — it arrived in a shell
+comment that spelled the delimiter out to explain why the code avoided it.
+
+The second is the 21,000-character cap on a single expression. A block scalar containing an
+interpolation is compiled into one `format(...)` expression whose length is the *dedented* scalar,
+so a long, heavily commented `run:` block that interpolates anything is a workflow GitHub refuses to
+load: the run concludes `failure` in 0s with **zero jobs**, no check reports, and every pull request
+in the org blocks. The two commits either side of it measure 24,860 characters (broken) and 20,545
+(the revert) — 455 to spare, or about six comment lines. So the check warns from 90% of the cap, and
+warns separately about a long block that has *no* expression yet, since adding one would make the
+same text fatal. The way out is to move the interpolations into `env:`, which removes the cap from
+that block entirely.
+
 ## Setup
 
 Requires:

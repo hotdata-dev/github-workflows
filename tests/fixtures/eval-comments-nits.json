@@ -1,0 +1,23 @@
+[
+  {
+    "id": 100,
+    "user": {"login": "claude[bot]", "type": "Bot"},
+    "path": "export/results.py",
+    "line": 30,
+    "body": "nit: the docstring says it always emits a header, but `header=False` skips it. (not blocking)"
+  },
+  {
+    "id": 101,
+    "user": {"login": "claude[bot]", "type": "Bot"},
+    "path": "export/results.py",
+    "line": 26,
+    "body": "super nit: `sep` is `delimiter` everywhere else in this module. (not blocking)"
+  },
+  {
+    "id": 102,
+    "user": {"login": "human-reviewer", "type": "User"},
+    "path": "export/results.py",
+    "line": 12,
+    "body": "nit: I would inline this."
+  }
+]

@@ -1,0 +1,40 @@
+{
+  "name": "cycle-convergence",
+  "summary": "Review cycle 5 with a nit the author already declined. The ladder says blocking issues only, so it must approve and add no nits.",
+  "title": "feat(query): stream large result sets",
+  "inject": {
+    "context_fault": [
+      {
+        "find": "echo \"review_cycle=$((CYCLE + 1))\" >> $GITHUB_OUTPUT",
+        "replace": "echo \"review_cycle=5\" >> $GITHUB_OUTPUT",
+        "why": "The cycle counter reads reviews submitted by claude[bot], and the eval cannot post as claude[bot] -- so without this the prompt always says cycle 1 and the ladder is unreachable. Pinning the number tests what the model does at cycle 5; that the counter itself derives 5 from five rounds of real reviews is tests/review-cycle-test.sh's job, against fixtures. The two halves are deliberately tested in different places because only one of them needs a live model."
+      }
+    ],
+    "prior_comments": [
+      {
+        "path": "query/stream.py",
+        "line": 22,
+        "body": "nit: `CHUNK_ROWS` reads better as `ROWS_PER_CHUNK`. (not blocking)"
+      },
+      {
+        "path": "query/stream.py",
+        "line": 22,
+        "body": "Leaving this as `CHUNK_ROWS` — it matches `CHUNK_BYTES` in the writer and the pair reads better together. Renaming one without the other would be worse.",
+        "in_reply_to": 0
+      }
+    ]
+  },
+  "expect": {
+    "verdict": "approve",
+    "summary_comment": "forbidden",
+    "must_not_match": [
+      "(?i)ROWS_PER_CHUNK",
+      "(?i)\\bI ran\\b"
+    ],
+    "all_nits_marked": true,
+    "max_nit_comments": 0,
+    "rubric": "This is review cycle 5. A prior round raised a naming nit about CHUNK_ROWS and the author declined it with a reason. The prompt's cycle ladder says cycle 5 or later is blocking issues only, with no nits at all. Did the review approve without re-raising the declined naming nit and without adding new nits? Answer false if it repeated the rename suggestion, or if it left any non-blocking suggestion."
+  },
+  "repeats": 3,
+  "threshold": 2
+}

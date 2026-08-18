@@ -55,6 +55,12 @@ jobs:
       - name: Context step end to end
         run: tests/context-step-test.sh
 
+      # The eval's own tests, not the eval. Scenario definitions and tests/eval-grade.py are
+      # checked here on every pull request at no cost; the eval itself spends real API calls and
+      # runs from .github/workflows/claude-review-eval.yml.
+      - name: Reviewer eval scenarios and grader
+        run: tests/eval-test.sh
+
   # Runs claude-pr-review.yml itself, from this commit, with the review step skipped. The checks
   # above all read the workflow as text; this one hands it to Actions and asks whether it starts.
   #

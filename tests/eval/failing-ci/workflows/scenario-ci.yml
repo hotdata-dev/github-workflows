@@ -1,0 +1,52 @@
+# Injected into the head branch by the eval, never merged anywhere.
+#
+# The point is a *real* failing Actions job, not a synthetic check run. The reviewer's context step
+# finds failing jobs by scanning `detailsUrl` for `/job/<id>` and then fetching
+# `/actions/jobs/<id>/logs`, so a check posted through the Checks API carries no job id, the log
+# fetch renders "(log unavailable)", and the log-excerpt path -- the part of the context worth
+# testing -- never runs.
+#
+# It triggers on `push` as well as `pull_request` because the eval waits for the branch's own push
+# checks to conclude before opening the pull request. Checks attach to the head SHA, so the review
+# then sees a check that has already failed rather than one still queued, which the prompt
+# correctly tells it to treat as no evidence either way.
+#
+# The output is shaped for the two windows the context step collects: a summary line matching its
+# LOG_SUMMARY_RE, and a cause sitting directly above the first `##[error]` marker.
+name: Scenario CI
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run the suite
+        run: |
+          cat <<'OUT'
+          test_cache_returns_columns_for_known_table ... ok
+          test_cache_key_includes_workspace ... ok
+          test_cache_is_invalidated_on_schema_change ... FAIL
+
+          ======================================================================
+          FAIL: test_cache_is_invalidated_on_schema_change
+          ----------------------------------------------------------------------
+          Traceback (most recent call last):
+            File "tests/test_column_cache.py", line 48, in test_cache_is_invalidated_on_schema_change
+              self.assertEqual(cache.get("orders"), ["id", "total", "currency"])
+          AssertionError: Lists differ: ['id', 'total'] != ['id', 'total', 'currency']
+
+          - ['id', 'total']
+          + ['id', 'total', 'currency']
+
+          ----------------------------------------------------------------------
+          Ran 3 tests in 0.041s
+
+          FAILED (failures=1)
+          OUT
+          exit 1
