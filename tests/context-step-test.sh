@@ -708,11 +708,50 @@ fi
 # this budget measures for quote-dense patches, 2,000 lines of dashboard JSON is about 120
 # KB escaped, over CTX_MAX_BYTES on its own. So on any cycle-2+ generated-file PR that one
 # block drove the tail cut.
+# With a maxed review history as well, which is the case a share of the wrong total hides.
+# Threads takes half of PROMPT_BUDGET, so CTX_MAX_BYTES is the other half -- and a since-diff
+# cap denominated in PROMPT_BUDGET is then the whole of the context allowance, letting one
+# block fill it and handing the tail cut everything ordered after it: the full diff's
+# omission notice, the instructions under it, and the conversation. A cycle-5+ PR with a long
+# comment history and a dense patch is exactly that run, and it is the shape the byte cap was
+# added to prevent one level up.
+# The full diff is oversized here too, so what has to survive is the whole omission block --
+# heading, notice and instructions. That is the text the tail cut took when this share was
+# denominated in the wrong total, and it is the text the reviewer needs most on this run.
+STUB_THREAD_COMMENTS=60 STUB_SINCE_LINES=2000 STUB_SINCE_STYLE=json STUB_DIFF_LINES=4000 \
+  run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a dense since-diff beside a long history"
+expect_context '^## Full diff' "the full diff heading survives both at once"
+expect_context 'full diff omitted: too large for the review prompt' \
+  "the omission notice survives both at once"
+expect_context 'The patch is NOT below' "the omission instructions survive both at once"
+expect_context '^## PR conversation' "the conversation survives both at once"
+
 STUB_SINCE_LINES=2000 STUB_SINCE_STYLE=json run_step > "$WORK/code.txt"
 expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a since-diff that is huge in bytes"
 expect_context '^## Diff since your last review' "the since-diff block renders"
 expect_context '^\+      "since": "line 1' "the since-diff keeps a prefix rather than a notice"
-expect_context 'cut to fit the prompt' "an over-byte since-diff says it was cut"
+expect_context 'since-diff cut to fit the review prompt' "an over-byte since-diff says it was cut"
+# And says it in wording that is true. Reusing the line-cap notice here printed "truncated:
+# first 2000 of 1500 lines" on a block whose line count was never cut -- the byte cap fires
+# independently, and on dense content it fires below SINCE_MAX. A notice that names a figure
+# the reviewer was not given is worse than no notice; the document quotes these.
+STUB_SINCE_LINES=1500 STUB_SINCE_STYLE=json run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a dense since-diff inside SINCE_MAX"
+expect_context 'since-diff cut to fit the review prompt' \
+  "a since-diff cut only by bytes says so"
+expect_no_context 'truncated: first 2000 of 1500' \
+  "no notice claims a line cut that did not happen"
+
+# What the full diff is charged for has to be what the since-diff actually spent. Fixing
+# SINCE_USED at min(SINCE_LINES, SINCE_MAX) before the byte cap ran charged it for lines the
+# block did not keep: a dense since-diff cut to a few hundred rendered lines still reserved
+# 2,000, leaving FULL_DIFF_MAX at 1,000 and omitting a 1,500-line full diff with the byte
+# allowance wide open. The same over-reserve as the conversation's, in the other currency.
+STUB_SINCE_LINES=1500 STUB_SINCE_STYLE=json STUB_DIFF_LINES=1500 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 with a dense since-diff and a full diff"
+expect "$(grep -c '^+line ' "$CTX_FILE" || true)" "1500" \
+  "the full diff is charged only for the lines the since-diff kept"
 # The blocks written after it, which are what the tail cut would have taken instead.
 expect_context '^## Full diff' "the full diff heading survives a byte-heavy since-diff"
 expect_context '^## PR conversation' "the conversation survives a byte-heavy since-diff"
