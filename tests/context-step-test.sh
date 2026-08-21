@@ -134,7 +134,25 @@ case "$args" in
     fi
     ;;
   *"/pulls/"*"/commits"*)  fail_if_marked commits; cat "$FIXTURES/pull-commits.json" ;;
-  *"/pulls/"*"/files"*)    fail_if_marked files; cat "$FIXTURES/pull-files.json" ;;
+  *"/pulls/"*"/files"*)
+    fail_if_marked files
+    # STUB_FILES reaches the far end of `--paginate` on this endpoint: GitHub returns up to
+    # 3,000 files, and the block renders a line each. The shipped fixture is the ordinary
+    # case and every other file assertion is written against it.
+    if [ "${STUB_FILES:-0}" -gt 0 ]; then
+      awk -v n="$STUB_FILES" 'BEGIN {
+        printf "[";
+        for (i = 0; i < n; i++) {
+          if (i) printf ",";
+          printf "{\"status\":\"modified\",\"additions\":%d,\"deletions\":%d,", i % 90, i % 7;
+          printf "\"filename\":\"packages/generated/module_%06d/src/deeply/nested/path/component_%06d.ts\"}", i, i;
+        }
+        printf "]\n";
+      }'
+    else
+      cat "$FIXTURES/pull-files.json"
+    fi
+    ;;
   *"/issues/"*"/comments"*)
     fail_if_marked issue_comments
     if [ "$STUB_CONVO_COMMENTS" -gt 0 ]; then
@@ -198,7 +216,18 @@ case "$args" in
         # Padding, so the since-diff can be made to compete with the full diff for the
         # shared line budget. Tagged distinctly from the full diff's "+line" so a test
         # can tell which block a rendered line came from.
-        awk -v n="$STUB_SINCE_LINES" 'BEGIN { for (i = 1; i <= n; i++) print "+since " i }'
+        #
+        # STUB_SINCE_STYLE is the since-diff's twin of STUB_DIFF_STYLE below, and it has to
+        # exist separately: SINCE_MAX bounds this block in lines only, so a test that wants
+        # to reach its *byte* cap needs long lines here, and a short "+since N" cannot get
+        # there at any line count SINCE_MAX permits.
+        awk -v n="$STUB_SINCE_LINES" -v style="$STUB_SINCE_STYLE" 'BEGIN {
+          for (i = 1; i <= n; i++) {
+            if (style == "json")
+              printf "+      \"since\": \"line %d, \\\"quoted\\\" text, and enough further payload on this line to make it dense\",\n", i;
+            else print "+since " i;
+          }
+        }'
         ;;
       *)
         printf '{"status":"%s","ahead_by":2,"behind_by":0}\n' "$COMPARE_STATUS"
@@ -257,6 +286,8 @@ run_step() {
     STUB_DIFF_TAGS="${STUB_DIFF_TAGS:-0}" \
     STUB_DIFF_STYLE="${STUB_DIFF_STYLE:-plain}" \
     STUB_SINCE_LINES="${STUB_SINCE_LINES:-0}" \
+    STUB_SINCE_STYLE="${STUB_SINCE_STYLE:-plain}" \
+    STUB_FILES="${STUB_FILES:-0}" \
     FAIL_ENDPOINT="${FAIL_ENDPOINT:-none}" \
     HEAD_SHA="${HEAD_SHA:-1d01475432236aa4fbca722aaaa2687c2b2e4947}" \
     BASE_REF=main \
@@ -330,6 +361,19 @@ expect_context() {
   else
     echo "FAIL $2: no line matching /$1/ in the rendered context"
     failures=$((failures + 1))
+  fi
+}
+
+# expect_no_context <grep pattern> <description> -- the inverse, for the blocks that must be
+# absent rather than partial. context_has reads from a file, not a pipe, so a negative
+# assertion here cannot be inverted into a vacuous pass by SIGPIPE; see CTX_FILE above.
+expect_no_context() {
+  if context_has "$1"; then
+    echo "FAIL $2: a line matching /$1/ is in the rendered context"
+    grep -nE -m3 -- "$1" "$CTX_FILE" | sed 's/^/     /'
+    failures=$((failures + 1))
+  else
+    echo "ok   $2"
   fi
 }
 
@@ -561,13 +605,173 @@ for v in 2.96 2.97; do
   expect_context 'FAILED \(failures=1' "failing job log reaches the context on gh $v"
 done
 
-# --- Truncation --------------------------------------------------------------------------
-
-# 2998, not 3000: the stub's since-diff is two lines, and the two diff blocks share one
-# 3,000-line budget rather than holding independent caps. See the shared-budget section below.
+# --- The full diff is all-or-nothing ------------------------------------------------------
+#
+# A diff that does not fit is omitted, not trimmed. Two weeks of production runs are the
+# argument: 108 runs had their context cut, and only 23% of them re-fetched anything --
+# the other 77% reviewed the prefix they were handed and said nothing about the rest. The
+# ones that did re-fetch found 1.91 issues per run against 0.92 for the ones that did not.
+# A prefix is worse than an absence because it reads as the whole patch: what survives is
+# whichever files sort first, not whichever matter, and the notice announcing the cut was
+# one line at the very end of a context the reviewer had already read past.
+#
+# The reviewer can get the whole patch itself -- `gh pr diff` is allowlisted and was
+# refused 0 times in 54 attempts across those two weeks -- so omitting costs it a turn and
+# buys back a complete diff. That trade is only available for this block, which is why the
+# since-diff above still truncates: `gh api .../compare` is not on the allowlist, so a
+# since-diff the reviewer cannot re-fetch is worth more as a prefix than as a notice.
 expect "$(STUB_DIFF_LINES=4000 run_step)" "0" "step exits 0 on an oversized diff"
-expect_context '\(truncated: first 2998 of 4000 lines' "oversized diff truncated with a notice"
-expect "$(grep -c '^+line ' "$CTX_FILE")" "2998" "truncated diff carries exactly the cap"
+expect_context '^## Full diff' "an omitted diff still renders its heading"
+expect_context 'full diff omitted: too large for the review prompt' \
+  "a diff over the line budget is omitted with a notice"
+expect_context '4000 lines' "the omission notice names the diff's real size"
+expect "$(grep -c '^+line ' "$CTX_FILE" || true)" "0" \
+  "no partial patch is left behind under the heading"
+# The list of paths is what turns the notice into a plan: it is the only block that tells
+# the reviewer which files to fetch or read, and it is ordered above the diff so it always
+# survives. An omission notice without it sends the reviewer at a 37,000-line PR blind.
+expect_context '^## Changed files' "the changed-file list survives a diff omission"
+expect_context '^modified \+[0-9]+/-[0-9]+ ' "the changed-file list keeps its per-file counts"
+
+# The byte half of the same decision. 3,000 lines of quote-dense JSON is the shape that
+# broke production: it costs about 1.20x escaped where prose costs 1.02x, so it sits inside
+# the line budget and outside the byte budget. Before this it rendered as a prefix cut by
+# the tail cap; now it is the notice.
+STUB_DIFF_LINES=3000 STUB_DIFF_STYLE=json run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a diff that fits in lines but not bytes"
+expect_context 'full diff omitted: too large for the review prompt' \
+  "a diff inside the line budget but over the byte budget is omitted"
+expect_no_context '"description": "line 1' \
+  "no partial patch is left behind when the byte budget is what refused it"
+# And the block below it, which is what the tail cut used to eat first. On the production
+# run this is drawn from -- www.hotdata.dev#332 -- `## PR conversation` did not render at
+# all, because it is written after the diff and the cut works from the end.
+expect_context '^## PR conversation' "the conversation survives a diff that will not fit"
+
+# A diff that fits is still passed whole, with no notice. The omission is a response to the
+# budget, not a policy: most PRs are nowhere near it (the median reviewed across the org is
+# 161 changed lines) and re-fetching what was already affordable would spend a turn for
+# nothing.
+STUB_DIFF_LINES=40 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a diff that fits"
+expect "$(grep -c '^+line ' "$CTX_FILE" || true)" "40" "a diff that fits is passed whole"
+expect_no_context 'full diff omitted' "a diff that fits carries no omission notice"
+
+# What the diff reserves for the conversation has to be what the conversation will weigh,
+# not what it was allowed to weigh. The common case is "No PR conversation comments." at 29
+# bytes; reserving an eighth of the budget against that hands back around 1,200 patch lines
+# that nothing will spend. Cheap while the shortfall cost the diff a prefix, and not cheap
+# now that it costs the whole block -- an over-reserve converts directly into omissions on
+# pull requests whose diff would have fit.
+#
+# 1,800 lines of quote-dense diff is inside that window: it fits beside an empty
+# conversation and not beside a conversation at its cap. A reserve that is a constant
+# cannot tell those two runs apart, so this pair is what pins the reserve to the real size.
+STUB_DIFF_LINES=1800 STUB_DIFF_STYLE=json run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a diff at the edge of its allowance"
+expect "$(grep -c 'description' "$CTX_FILE" || true)" "1800" \
+  "a diff inside the allowance renders whole when the conversation is empty"
+STUB_DIFF_LINES=1800 STUB_DIFF_STYLE=json STUB_CONVO_COMMENTS=300 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on the same diff beside a full conversation"
+expect_context 'full diff omitted: too large for the review prompt' \
+  "the same diff is omitted once the conversation really needs its share"
+
+# The annotation and the block have to agree. They used to be two spellings of the same
+# condition thirty lines apart, free to drift into a context that says the diff is absent
+# while the run reports nothing, or the reverse -- which is the invisible failure the
+# annotation exists to end. `{ ... } >> file` is a group command, not a subshell, so the
+# flag set inside it is what both readers use.
+STUB_DIFF_LINES=4000 run_step > /dev/null
+if grep -q 'full diff omitted' "$CTX_FILE" \
+  && grep -q '::notice::Full diff omitted from the review prompt' "$WORK/step.out"; then
+  echo "ok   an omitted diff is annotated as well as announced in the context"
+else
+  echo "FAIL the omission notice and the ::notice:: annotation disagree:"
+  printf '     context says omitted: %s, annotation present: %s\n' \
+    "$(grep -q 'full diff omitted' "$CTX_FILE" && echo yes || echo no)" \
+    "$(grep -q '::notice::Full diff omitted' "$WORK/step.out" && echo yes || echo no)"
+  failures=$((failures + 1))
+fi
+STUB_DIFF_LINES=40 run_step > /dev/null
+if grep -q '::notice::Full diff omitted' "$WORK/step.out"; then
+  echo "FAIL a diff that was passed whole was annotated as omitted"
+  failures=$((failures + 1))
+else
+  echo "ok   a diff that fits is not annotated as omitted"
+fi
+
+# The two blocks above the diff that had no byte cap of their own. Both are written before
+# `## Full diff`, so an overflow in either is paid for by the diff's omission notice and the
+# conversation -- the tail cut works from the end, and they do not sit at the end.
+#
+# The since-diff is the sharper of the two: SINCE_MAX bounds it in lines, and at the 1.20x
+# this budget measures for quote-dense patches, 2,000 lines of dashboard JSON is about 120
+# KB escaped, over CTX_MAX_BYTES on its own. So on any cycle-2+ generated-file PR that one
+# block drove the tail cut.
+# With a maxed review history as well, which is the case a share of the wrong total hides.
+# Threads takes half of PROMPT_BUDGET, so CTX_MAX_BYTES is the other half -- and a since-diff
+# cap denominated in PROMPT_BUDGET is then the whole of the context allowance, letting one
+# block fill it and handing the tail cut everything ordered after it: the full diff's
+# omission notice, the instructions under it, and the conversation. A cycle-5+ PR with a long
+# comment history and a dense patch is exactly that run, and it is the shape the byte cap was
+# added to prevent one level up.
+# The full diff is oversized here too, so what has to survive is the whole omission block --
+# heading, notice and instructions. That is the text the tail cut took when this share was
+# denominated in the wrong total, and it is the text the reviewer needs most on this run.
+STUB_THREAD_COMMENTS=60 STUB_SINCE_LINES=2000 STUB_SINCE_STYLE=json STUB_DIFF_LINES=4000 \
+  run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a dense since-diff beside a long history"
+expect_context '^## Full diff' "the full diff heading survives both at once"
+expect_context 'full diff omitted: too large for the review prompt' \
+  "the omission notice survives both at once"
+expect_context 'The patch is NOT below' "the omission instructions survive both at once"
+expect_context '^## PR conversation' "the conversation survives both at once"
+
+STUB_SINCE_LINES=2000 STUB_SINCE_STYLE=json run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a since-diff that is huge in bytes"
+expect_context '^## Diff since your last review' "the since-diff block renders"
+expect_context '^\+      "since": "line 1' "the since-diff keeps a prefix rather than a notice"
+expect_context 'since-diff cut to fit the review prompt' "an over-byte since-diff says it was cut"
+# And says it in wording that is true. Reusing the line-cap notice here printed "truncated:
+# first 2000 of 1500 lines" on a block whose line count was never cut -- the byte cap fires
+# independently, and on dense content it fires below SINCE_MAX. A notice that names a figure
+# the reviewer was not given is worse than no notice; the document quotes these.
+STUB_SINCE_LINES=1500 STUB_SINCE_STYLE=json run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a dense since-diff inside SINCE_MAX"
+expect_context 'since-diff cut to fit the review prompt' \
+  "a since-diff cut only by bytes says so"
+expect_no_context 'truncated: first 2000 of 1500' \
+  "no notice claims a line cut that did not happen"
+
+# What the full diff is charged for has to be what the since-diff actually spent. Fixing
+# SINCE_USED at min(SINCE_LINES, SINCE_MAX) before the byte cap ran charged it for lines the
+# block did not keep: a dense since-diff cut to a few hundred rendered lines still reserved
+# 2,000, leaving FULL_DIFF_MAX at 1,000 and omitting a 1,500-line full diff with the byte
+# allowance wide open. The same over-reserve as the conversation's, in the other currency.
+STUB_SINCE_LINES=1500 STUB_SINCE_STYLE=json STUB_DIFF_LINES=1500 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 with a dense since-diff and a full diff"
+expect "$(grep -c '^+line ' "$CTX_FILE" || true)" "1500" \
+  "the full diff is charged only for the lines the since-diff kept"
+# The blocks written after it, which are what the tail cut would have taken instead.
+expect_context '^## Full diff' "the full diff heading survives a byte-heavy since-diff"
+expect_context '^## PR conversation' "the conversation survives a byte-heavy since-diff"
+expect "$(escaped_of "$CTX_FILE" \
+  | awk -v lim="$PROMPT_ARG_LIMIT" '{print ($1 <= lim) ? "bounded" : "over"}')" \
+  "bounded" "a byte-heavy since-diff stays inside the argument limit"
+
+# The changed-file list, the other block with no byte cap and the one the omission notice
+# sends the reviewer to. `--paginate` returns up to GitHub's 3,000-file ceiling at around
+# 60 bytes a line.
+STUB_FILES=3000 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a PR with thousands of changed files"
+expect_context '^## Changed files' "the changed-file block renders"
+expect_context 'changed file list truncated' "an oversized changed-file list says it was cut"
+expect_context '^## Full diff' "the full diff heading survives a huge changed-file list"
+expect "$(escaped_of "$CTX_FILE" \
+  | awk -v lim="$PROMPT_ARG_LIMIT" '{print ($1 <= lim) ? "bounded" : "over"}')" \
+  "bounded" "thousands of changed files stay inside the argument limit"
+
+# --- Truncation --------------------------------------------------------------------------
 
 # An empty body under a heading is a claim: "## Full diff" with nothing beneath it reads as
 # "nothing changed", and the reviewer has been told not to re-fetch what it was given. The
@@ -577,12 +781,33 @@ STUB_DIFF_LINES=0 run_step > "$WORK/code.txt"
 expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on an empty diff"
 expect_context 'came back empty' "an empty diff says so rather than showing a bare heading"
 
-# The byte cap. Reaching it is a claim too: the cut lands wherever the byte count runs out,
-# so the notice has to be appended *after* the cut or it is the first thing removed. And the
-# ordering of the blocks is what decides whose content is lost -- the conversation is last
-# because it is the block the reviewer can most afford to lose, while the diff and the CI
-# status have to survive.
+# The conversation block holds a cap of its own now, for the same reason the threads block
+# does: it is the last block written, so without one it is both the block that overflows the
+# budget and the block the tail cut removes to pay for the overflow. 300 comments rendered
+# 700 KB. Bounding it is also what makes the diff's fit decision above answerable -- the
+# diff cannot ask "is there room for me" while an unbounded block is still to come.
 STUB_CONVO_COMMENTS=300 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a PR with hundreds of conversation comments"
+expect_context '^## PR conversation' "the conversation block renders"
+expect_context 'PR conversation truncated' "an oversized conversation says it was cut"
+expect_context '^## Full diff' "the diff block survives a huge conversation"
+expect_context '^\+line 1$' "the diff body survives a huge conversation"
+expect_context '^## CI checks' "the CI block survives a huge conversation"
+# The cap's real job, as opposed to its notice: without it this block alone rendered 700 KB
+# and the only thing standing between that and a failed exec was the tail cut. The diff's
+# fit decision reserves CONVO_MAX_BYTES for this block, and a reserve against an unbounded
+# writer is not a bound.
+expect "$(escaped_of "$CTX_FILE" \
+  | awk -v lim="$PROMPT_ARG_LIMIT" '{print ($1 <= lim) ? "bounded" : "over"}')" \
+  "bounded" "hundreds of conversation comments stay inside the argument limit"
+
+# The tail cut, which is now a backstop rather than the ordinary path. Every *fetched* block
+# is bounded; the PR body arrives through `env:` rather than an API read and has no cap -- a generated
+# release-note body is how a context still reaches the limit. Reaching it is a claim too:
+# the cut lands wherever the byte count runs out, so the notice has to be appended *after*
+# the cut or it is the first thing removed.
+BIG_BODY=$(awk 'BEGIN { s = ""; for (i = 0; i < 3000; i++) s = s "release note line with plenty of detail "; print s }')
+PR_BODY="$BIG_BODY" run_step > "$WORK/code.txt"
 expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when the context exceeds the byte cap"
 # No byte count in this pattern: the cap is derived per run now -- from the argument limit
 # less the wrapper, the prompt document and the threads block -- so asserting a literal here
@@ -590,9 +815,10 @@ expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when the context exceeds the 
 # ship. What has to hold is that the notice is present and names a figure.
 expect_context '\(context truncated to fit the review prompt' \
   "the truncation notice survives the truncation"
-expect_context '^## Full diff' "the diff block survives the truncation"
-expect_context '^\+line 1$' "the diff body survives the truncation"
-expect_context '^## CI checks' "the CI block survives the truncation"
+# The head is what the cut keeps, so what has to survive is what was ordered first. The diff
+# is no longer among those blocks: on a context this far over budget it has no allowance, so
+# it renders as its omission notice and the reviewer is told to fetch it.
+expect_context '^## Pull request' "the first block survives the truncation"
 # The assertion this replaces allowed 210000 bytes, which was above the limit the prompt is
 # actually bounded by -- it would have passed on a context that could not be handed to the
 # reviewer at all. Measured escaped, because that is the copy the limit applies to.
@@ -670,6 +896,67 @@ fi
 expect_context '^## Full diff' "the diff block survives three jobs of enormous logs"
 expect_context '^\+line 1$' "the diff body survives three jobs of enormous logs"
 
+# The same three jobs beside a maxed review history, which is where the log allowance's
+# denominator shows. A quarter of PROMPT_BUDGET is *half* the context once threads is at its
+# own cap, and cap_log_excerpt charges raw bytes rather than escaped, so the excerpts arrive
+# larger than they were counted. The blocks written after them are what pays: the
+# conversation, and the full diff's omission instructions -- the text the shares exist to
+# protect. The diff is oversized here so that text is what has to be present.
+# The since-diff is dense here too, at its own half of the context: a log allowance that is
+# a quarter of the *budget* is another half, and the two together are the whole of it before
+# the changed-file list and the conversation are written. That sum is the run, and it is why
+# both shares have to read off the same denominator -- fixing either alone leaves the other
+# free to spend what the first gave back.
+# Every capped block at its ceiling simultaneously, which is what makes the shares' *sum*
+# the quantity under test rather than any one of them. When they summed to exactly 1 --
+# since-diff CTX/2, logs CTX/4, files CTX/8, conversation CTX/8 -- there was no headroom
+# left for the PR body, the commits, the CI list, the headings or the diff, and the log
+# share spent more than it was charged because it billed raw where everything else billed
+# escaped. `DIFF_ALLOWANCE` goes negative on this run, so the diff correctly omits itself;
+# the context was over budget before the omission text and `## PR conversation` were
+# written, and the tail cut takes those bottom-up. What it leaves is a `## Full diff`
+# heading with the context-truncation notice under it -- a heading with nothing beneath it,
+# which the empty-diff branch exists to prevent by another route.
+STUB_THREAD_COMMENTS=60 STUB_FAILING_JOBS=3 STUB_JOB_LOG="$FAT_LOG" STUB_DIFF_LINES=4000 \
+  STUB_SINCE_LINES=2000 STUB_SINCE_STYLE=json STUB_FILES=3000 STUB_CONVO_COMMENTS=300 \
+  run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 with every capped block at its ceiling"
+expect_context 'full diff omitted: too large for the review prompt' \
+  "the omission notice survives every block at its ceiling"
+expect_context 'The patch is NOT below' \
+  "the omission instructions survive every block at its ceiling"
+expect_context '^## PR conversation' \
+  "the conversation survives every block at its ceiling"
+# The sum, stated as a margin rather than as a pass/fail against the limit. Boundedness is
+# too weak to be the assertion here: with the shares summing to exactly 1 this run measured
+# 58,397 escaped against an allowance of 60,356 -- inside it, but by 3%, and only because
+# cap_file_escaped hands back 300 bytes a call and undershoots its target by 2%. A worst case
+# that clears by rounding error is one comment line from the tail cut, and the argument for
+# having per-block shares at all is that the tail cut stays a backstop. The same run now
+# measures around 40,600, near 67% of the allowance.
+#
+# The allowance is derived the way the script derives it, from the same declared constants,
+# so a prompt document that grows or a share that is widened moves this number here too
+# rather than silently spending the margin.
+maxed_ctx=$(escaped_of "$CTX_FILE")
+maxed_threads=$(escaped_of "$THREADS_FILE_OUT")
+# Read out of the script, not repeated here, for the reason the wrapper assertion further
+# down reads its constant the same way: a second copy of a budget term drifts from the first.
+maxed_wrapper=$(sed -n 's/^PROMPT_WRAPPER_BYTES=\([0-9]*\)$/\1/p' "$CONTEXT_SCRIPT")
+maxed_allowance=$((PROMPT_ARG_LIMIT - ALL_INPUTS_OTHER_BYTES - maxed_wrapper \
+  - $(escaped_of docs/claude-pr-review-prompt.md) - 1024 - maxed_threads))
+maxed_pct=$((maxed_ctx * 100 / maxed_allowance))
+if [ "$maxed_pct" -le 85 ]; then
+  echo "ok   every block at its ceiling leaves headroom (${maxed_pct}% of the allowance used)"
+else
+  echo "FAIL every capped block at its ceiling leaves no headroom for the uncapped ones:"
+  printf '     %s escaped bytes against a %s byte allowance (%s%%), threads at %s\n' \
+    "$maxed_ctx" "$maxed_allowance" "$maxed_pct" "$maxed_threads"
+  printf '     the per-block shares of the context sum too close to 1; the tail cut is the\n'
+  printf '     ordinary path on this run rather than a backstop\n'
+  failures=$((failures + 1))
+fi
+
 # Sharing a budget decides *what* the excerpts spend it on, and the region total above cannot
 # see that. The summary is written first and the first-error window second, but the window is
 # the block worth the most: across five real failed logs the cause sat immediately above the
@@ -738,20 +1025,23 @@ ENDPOINTS
 # not get.
 #
 # The since-diff keeps its share, because on cycle 2+ what changed since the last round is
-# the reviewer's subject; the full diff yields, and its notice says how to get the rest.
+# the reviewer's subject and it is the block the reviewer cannot fetch for itself. The full
+# diff yields, and now yields entirely: this is the shape that drove the production numbers
+# in the all-or-nothing section above. 74% of runs on PRs over 1,000 lines at cycle 5+ were
+# cut, against 25% at cycle 1, because the since-diff is what the later cycles add.
 STUB_SINCE_LINES=2500 STUB_DIFF_LINES=3000 run_step > "$WORK/code.txt"
 expect "$(cat "$WORK/code.txt")" "0" "step exits 0 when both diff blocks are oversized"
 since_rendered=$(awk '/^\+since /' "$CTX_FILE" | wc -l | tr -d ' ')
 full_rendered=$(awk '/^\+line /' "$CTX_FILE" | wc -l | tr -d ' ')
 # 1998 of the since-diff's 2,000-line share, the other two lines being its header and the
-# "+incremental change" body line; 1,000 for the full diff, which is what the shared 3,000
-# leaves it.
+# "+incremental change" body line.
 expect "$since_rendered" "1998" "the since-diff keeps its full share of the budget"
-expect "$full_rendered" "1000" "the full diff takes only what the since-diff left"
-expect "$((since_rendered + full_rendered))" "2998" \
-  "the two diff blocks together stay inside the shared budget"
-expect_context '\(truncated: first 1000 of 3000 lines; run gh pr diff for the rest\)' \
-  "the reduced full diff says how much it is showing and how to get the rest"
+expect "$full_rendered" "0" \
+  "the full diff is omitted rather than reduced to what the since-diff left"
+expect_context '\(truncated: first 2000 of 2502 lines' \
+  "the since-diff truncates, because the reviewer cannot re-fetch a compare"
+expect_context 'full diff omitted: too large for the review prompt' \
+  "the full diff says it is absent and how to get it"
 
 # --- The assembled prompt fits in one environment string ----------------------------------
 #
@@ -796,7 +1086,7 @@ while IFS= read -r notice; do
     failures=$((failures + 1))
   fi
 done <<EOF
-$(sed -n "s/^NOTICE_[A-Z]*='\(.*\)'$/\1/p" "$CONTEXT_SCRIPT")
+$(sed -n "s/^NOTICE_[A-Z_]*='\(.*\)'$/\1/p" "$CONTEXT_SCRIPT")
 EOF
 if [ "$notice_count" -lt 4 ]; then
   echo "FAIL found $notice_count NOTICE_* constants in $CONTEXT_SCRIPT, expected at least 4" >&2
@@ -851,18 +1141,30 @@ else
   failures=$((failures + 1))
 fi
 
-# Truncating silently would be worse than truncating: the reviewer would report on a diff it
-# never saw, with no way to know it had not seen it.
-expect_context 'context truncated to fit the review prompt' \
-  "an over-budget context says it was truncated"
+# Losing the diff silently would be worse than losing it: the reviewer would report on a
+# patch it never saw, with no way to know it had not seen it. With every input oversized the
+# diff is the block that cannot fit, so what has to be present is the omission notice and
+# the instruction that goes with it -- not a truncated patch, and not a bare heading.
+expect_context 'full diff omitted: too large for the review prompt' \
+  "an over-budget context says the diff is absent"
+expect_context 'The patch is NOT below' \
+  "the omission says plainly that nothing was shown"
+expect_context 'gh pr diff 172 --repo hotdata-dev/dlthubworker' \
+  "the omission names the command that gets the patch"
 
 # The diff has to keep room. A long enough review history could otherwise spend the whole
 # budget on prior comments and leave the reviewer with nothing to review -- which is why the
-# threads cap is held to half the budget rather than being a fixed number beside it.
-if [ "$ctx_bytes" -gt $((PROMPT_ARG_LIMIT / 4)) ]; then
-  echo "ok   the diff keeps room against an oversized review history ($ctx_bytes bytes)"
+# threads cap is held to half the budget rather than being a fixed number beside it. Asserted
+# on a diff that should fit in what is left rather than on the context total: the total is no
+# longer a proxy for it, because a starved allowance now shows up as an omission notice, which
+# is small. 2,000 patch lines is about 22 KB escaped against an allowance near 40 KB.
+STUB_THREAD_COMMENTS=60 STUB_DIFF_LINES=2000 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on an oversized review history"
+if [ "$(grep -c '^+line ' "$CTX_FILE" || true)" = "2000" ]; then
+  echo "ok   the diff keeps room against an oversized review history"
 else
-  echo "FAIL an oversized review history starved the context: only $ctx_bytes bytes left"
+  echo "FAIL an oversized review history starved the diff's allowance:" \
+    "$(grep -c '^+line ' "$CTX_FILE" || true) of 2000 patch lines rendered"
   failures=$((failures + 1))
 fi
 

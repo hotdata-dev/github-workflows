@@ -74,10 +74,11 @@ LOG_WINDOW=120
 # subject and the full patch is one allowlisted `gh pr diff` away. Cycle 1 has no
 # since-diff, so the full diff keeps very nearly the whole budget.
 #
-# No floor is written under the full diff because SINCE_MAX sits below this number:
-# the since-diff can spend at most 2,000 of the 3,000 lines, so the full diff always
-# keeps the remaining 1,000. A floor would be a branch no input reaches. Raising
-# SINCE_MAX to meet or exceed this number is the change that would need one.
+# What "yields" means for the full diff is all of it, not a prefix of it: see the
+# omission branch below. So this number is a threshold rather than a share -- a full diff
+# that does not fit under it is replaced by a notice, and the 1,000 lines the since-diff
+# leaves it are not rendered as a partial patch. No floor is written under it for that
+# reason: there is nothing for a floor to protect.
 DIFF_BUDGET_LINES=3000
 # Byte budgets. Both of this step's outputs are interpolated into the SAME `prompt:`
 # string in the review step, and that string reaches the reviewer as one environment
@@ -154,19 +155,18 @@ fi
 # tail, so the diff is the block that paid: three verbose failing jobs took it out of
 # the context entirely. 40000 was sized against the old 200 KB context cap, so the
 # allowance is scaled off PROMPT_BUDGET like THREADS_MAX_BYTES instead. It is not also
-# kept as a per-excerpt cap: a quarter of the budget is around 30 KB, so 40000 could
+# kept as a per-excerpt cap: a quarter of the context is around 15 KB, so 40000 could
 # never be the binding number and stating it would only imply a second bound that does
 # not exist.
-LOG_BUDGET=$((PROMPT_BUDGET / 4))
-LOG_REMAINING=$LOG_BUDGET
-# What the summary may take of it. The excerpts are written summary first, window
-# second, but the window is the block worth more: across five real failed job logs the
-# cause sat immediately above the first ##[error] in four, and the summary is what
-# covers the fifth. Sharing an allowance first-come-first-served would invert that --
-# `tail -n 20` bounds the summary in lines, not bytes, so twenty stack-trace or JSON
-# lines take everything and the window for the same job renders as its own truncation
-# notice. Held to a quarter so the window keeps the larger share of whatever is left.
-LOG_SUMMARY_MAX=$((LOG_BUDGET / 4))
+#
+# Derived below, beside CTX_MAX_BYTES, rather than here: like the conversation, the
+# changed-file list and the since-diff, this share is of the context these excerpts are
+# written into and not of the whole prompt budget. A quarter of PROMPT_BUDGET is *half* the
+# context once threads is at its own cap, and it is charged raw rather than escaped --
+# cap_log_excerpt bills through wc -c -- so at the 1.20x this file measures for
+# quote-dense text those bytes arrive larger than they were counted. Three verbose failing
+# jobs beside a long review history is the run where that lands on the tail cut, and what
+# the tail cut takes is the conversation and then the full diff's omission instructions.
 # The truncation notices, as constants rather than literals at their call sites. The
 # prompt document quotes them and tells the reviewer that seeing one means the block is
 # incomplete and the rest has to be fetched before drawing conclusions from it -- so a
@@ -178,6 +178,14 @@ NOTICE_CONTEXT='context truncated to fit the review prompt'
 NOTICE_THREADS='prior review comments truncated'
 NOTICE_LOG='log excerpt truncated'
 NOTICE_LINES='truncated: first'
+NOTICE_CONVO='PR conversation truncated'
+NOTICE_FILES='changed file list truncated'
+NOTICE_COMMITS='commit list truncated'
+NOTICE_SINCE='since-diff cut to fit the review prompt'
+# Not a truncation notice: this block is absent, not short. It is listed with the others
+# because the contract is the same -- the prompt document has to quote it, or the reviewer
+# reads a diff heading with no patch under it and no idea that a patch exists.
+NOTICE_OMITTED='full diff omitted: too large for the review prompt'
 CTX="${RUNNER_TEMP}/pr-context.md"
 : > "$CTX"
 
@@ -223,9 +231,14 @@ cap_log_excerpt() {
       echo "($2)" >> "$1"
     fi
   else
-    cap_file "$1" "$limit" "$2"
+    # Escaped, like every other cap in this file. Billing raw `wc -c` against a share of a
+    # budget denominated in escaped bytes under-charged by whatever the content's expansion
+    # is -- about 1.20x for the quote-dense text a CI log is full of -- so an allowance of
+    # a quarter of the context arrived as nearer a third of it, and the blocks written after
+    # these excerpts paid the difference.
+    cap_file_escaped "$1" "$limit" "$2"
   fi
-  LOG_REMAINING=$((LOG_REMAINING - $(wc -c < "$1" | tr -d ' ')))
+  LOG_REMAINING=$((LOG_REMAINING - $(escaped_bytes "$1")))
   if [ "$LOG_REMAINING" -lt 0 ]; then LOG_REMAINING=0; fi
 }
 
@@ -384,6 +397,55 @@ printf '%s\n' "$THREADS" | strip_block_tags > "$THREADS_FILE"
 cap_file_escaped "$THREADS_FILE" "$THREADS_MAX_BYTES" \
   "${NOTICE_THREADS}; read the rest with gh pr view"
 
+# The bound that keeps the assembled prompt inside MAX_ARG_STRLEN. Context gets what the
+# threads block did not spend; threads is capped and written by this point, so its final
+# size is known rather than assumed.
+#
+# Derived here rather than at the cap site at the end of the file, because the full diff
+# block needs it: it decides whether to render a patch or a notice, and it cannot make that
+# call without knowing what the whole context is allowed to weigh. The cap at the end still
+# applies it -- this only moves the arithmetic above its first reader.
+THREADS_BYTES=$(escaped_bytes "$THREADS_FILE")
+CTX_MAX_BYTES=$((PROMPT_BUDGET - THREADS_BYTES))
+# Unreachable while THREADS_MAX_BYTES is clamped to half the budget. Kept because the
+# alternative if that clamp is ever loosened is `head -c` with a negative count, and an
+# empty context degrades a review where a failing cap_file loses it entirely.
+if [ "$CTX_MAX_BYTES" -lt 0 ]; then
+  CTX_MAX_BYTES=0
+fi
+
+# The PR conversation is the last block written, which without a cap of its own makes it
+# both the block that overflows the budget and the block the tail cut removes to pay for
+# the overflow -- 300 comments rendered 700 KB, and on www.hotdata.dev#332 the heading did
+# not render at all. An eighth of the context, the smallest share, because it is the block
+# the reviewer can most afford to lose: the inline threads carry the review history and
+# this carries the rest of the discussion.
+#
+# Denominated in CTX_MAX_BYTES rather than PROMPT_BUDGET, which is why it is derived here
+# and not beside the other caps: an eighth of the larger total is a quarter of the context
+# once threads is at its own cap, and a share that grows when the review history grows is
+# not a share. Every per-block share of the context reads the same way -- the log allowance
+# below, the changed-file list, and the since-diff. Only threads is a share of
+# PROMPT_BUDGET, because it is the block CTX_MAX_BYTES is derived by subtracting.
+#
+# Bounding it is also what makes the full diff's fit decision answerable. That decision
+# asks "is there room for the whole patch", and the question has no answer while an
+# unbounded block is still to come.
+CONVO_MAX_BYTES=$((CTX_MAX_BYTES / 8))
+# The log allowance, for the reasons given where LOG_WINDOW is set. Same denominator, same
+# argument: these excerpts are written into the context, so the context is what they are a
+# share of.
+LOG_BUDGET=$((CTX_MAX_BYTES / 8))
+LOG_REMAINING=$LOG_BUDGET
+# What the summary may take of it. The excerpts are written summary first, window
+# second, but the window is the block worth more: across five real failed job logs the
+# cause sat immediately above the first ##[error] in four, and the summary is what
+# covers the fifth. Sharing an allowance first-come-first-served would invert that --
+# `tail -n 20` bounds the summary in lines, not bytes, so twenty stack-trace or JSON
+# lines take everything and the window for the same job renders as its own truncation
+# notice. Held to a quarter so the window keeps the larger share of whatever is left.
+LOG_SUMMARY_MAX=$((LOG_BUDGET / 4))
+
 DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
 {
   echo "threads<<${DELIMITER}"
@@ -426,7 +488,17 @@ else
   echo "::warning::Could not read commits."
   COMMITS="Could not read commits."
 fi
-{ echo; echo "## Commits"; printf '%s\n' "$COMMITS"; } >> "$CTX"
+# Capped for the same reason as the changed-file list below, and it was the last fetched
+# block without one. The endpoint tops out at 250 commits, so the ordinary ceiling is around
+# 15 KB -- already a quarter of the context on a maxed-threads run -- but the rendered line
+# is a SHA and a git subject, and a git subject has no length bound, so the real ceiling is
+# whatever the author wrote. It sits above `## Full diff`, so an overflow here is paid for by
+# the omission notice and the conversation.
+COMMITS_FILE="${RUNNER_TEMP}/commits.md"
+printf '%s\n' "$COMMITS" | strip_block_tags > "$COMMITS_FILE"
+cap_file_escaped "$COMMITS_FILE" $((CTX_MAX_BYTES / 8)) \
+  "${NOTICE_COMMITS}; read the rest with gh pr view --json commits"
+{ echo; echo "## Commits"; cat "$COMMITS_FILE"; } >> "$CTX"
 
 # status carries added/modified/removed/renamed, which the raw patch does not spell
 # out for renames, and the per-file counts let the reviewer budget its reading.
@@ -440,7 +512,16 @@ else
   echo "::warning::Could not read changed files."
   FILES="Could not read changed files."
 fi
-{ echo; echo "## Changed files"; printf '%s\n' "$FILES"; } >> "$CTX"
+# Capped, because `--paginate` returns up to GitHub's 3,000-file ceiling and a line per
+# file is around 60 bytes -- 180 KB, over the whole budget, from a block with no cap of its
+# own. It matters more than its size suggests: this is the block the full diff's omission
+# notice sends the reviewer to, so it is the last one that should be able to overflow. An
+# eighth of the context, the same share as the conversation.
+FILES_FILE="${RUNNER_TEMP}/changed-files.md"
+printf '%s\n' "$FILES" | strip_block_tags > "$FILES_FILE"
+cap_file_escaped "$FILES_FILE" $((CTX_MAX_BYTES / 8)) \
+  "${NOTICE_FILES}; read the rest with gh pr view --json files"
+{ echo; echo "## Changed files"; cat "$FILES_FILE"; } >> "$CTX"
 
 # The reviewer cannot run tests -- no dependencies are installed and the allowlist
 # would refuse anyway -- but CI already ran them. Whether they passed is the one
@@ -551,15 +632,50 @@ if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" != "null" ] && [ "$LAST_SHA" != "$HEAD_SH
     # awk, not `wc -l`: wc pads its count with spaces on BSD and the number
     # is interpolated into the notice below, not just compared.
     SINCE_LINES=$(awk 'END {print NR}' "$SINCE_FILE")
-    SINCE_USED=$SINCE_LINES
-    if [ "$SINCE_USED" -gt "$SINCE_MAX" ]; then SINCE_USED=$SINCE_MAX; fi
+    # Line-capped and then byte-capped, because a line cap does not bound bytes: at the
+    # 1.20x this file measures for quote-dense JSON, 2,000 lines of dashboard patch is
+    # about 120 KB escaped, which is over CTX_MAX_BYTES on its own. This block is written
+    # *above* the full diff, so without the byte cap it is the block that drives the tail
+    # cut on a cycle-2+ generated-file PR -- and what the tail cut then removes is the
+    # full diff's omission notice and the conversation, not the since-diff that spent the
+    # budget.
+    #
+    # Half of CTX_MAX_BYTES, not of PROMPT_BUDGET. Those are the same number only when
+    # there is no review history: threads has already taken its own half out of
+    # PROMPT_BUDGET by this point, so on a cycle-5+ PR with a long comment history a share
+    # denominated in the larger total is the whole of what remains, and this one block can
+    # fill the context allowance by itself -- the very failure the byte cap is here to
+    # stop, one level up. The context is what this block writes into, so the context is
+    # what its share is measured against.
+    #
+    # cap_file_escaped rather than a smaller SINCE_MAX: the prefix is still what this
+    # block wants, for the reason the full diff below no longer keeps one -- `gh api
+    # .../compare` is not allowlisted, so a notice in place of this patch leaves the
+    # reviewer nothing it can fetch instead.
+    SINCE_CAPPED="${RUNNER_TEMP}/since-capped.diff"
+    head -n "$SINCE_MAX" "$SINCE_FILE" > "$SINCE_CAPPED"
+    if [ "$SINCE_LINES" -gt "$SINCE_MAX" ]; then
+      echo "(${NOTICE_LINES} ${SINCE_MAX} of ${SINCE_LINES} lines)" >> "$SINCE_CAPPED"
+    fi
+    # Its own notice, rather than a second copy of the line-cap wording, because the two
+    # caps fire independently and the byte cap fires at a *lower* line count than
+    # SINCE_MAX on exactly the dense content it exists for. Reusing the line wording there
+    # printed "truncated: first 2000 of 1500 lines" -- a claim about a cut that did not
+    # happen, naming a figure the reviewer was not given. These notices are a contract
+    # with the prompt document; one of them stating a falsehood is worse than none.
+    cap_file_escaped "$SINCE_CAPPED" $((CTX_MAX_BYTES / 3)) \
+      "${NOTICE_SINCE}; read the whole patch with gh pr diff"
+    # Recounted after both caps, because this is what the full diff is charged for. Fixing
+    # it at min(SINCE_LINES, SINCE_MAX) before the byte cap charged the full diff for lines
+    # this block did not end up spending: a dense since-diff cut to 400 rendered lines still
+    # reserved 2,000, leaving FULL_DIFF_MAX at 1,000 and omitting a 1,500-line full diff
+    # that the byte allowance had ample room for. The same over-reserve the conversation
+    # had, in the other currency, and with no notice to explain where the budget went.
+    SINCE_USED=$(awk 'END {print NR}' "$SINCE_CAPPED")
     {
       echo
       echo "## Diff since your last review (${LAST_SHA} to ${HEAD_SHA})"
-      head -n "$SINCE_MAX" "$SINCE_FILE"
-      if [ "$SINCE_LINES" -gt "$SINCE_MAX" ]; then
-        echo "(${NOTICE_LINES} ${SINCE_MAX} of ${SINCE_LINES} lines)"
-      fi
+      cat "$SINCE_CAPPED"
     } >> "$CTX"
   else
     {
@@ -580,9 +696,50 @@ fi
 FULL_DIFF_MAX=$((DIFF_BUDGET_LINES - SINCE_USED))
 if [ "$FULL_DIFF_MAX" -gt "$DIFF_MAX" ]; then FULL_DIFF_MAX=$DIFF_MAX; fi
 
+# Issue comments, not the pull comments above: the PR conversation is a separate
+# endpoint from the inline review threads, and only the threads were ever passed.
+#
+# Fetched and capped here, above the full diff, and written below it -- see the write site
+# for why the two are separated. Capped in its own file rather than appended straight to
+# $CTX, so the cap is on this block and not on the whole context: appending first and
+# capping after is the tail cut, which is what put this block's heading off the end of the
+# prompt on www.hotdata.dev#332. Stripped before the cap for the reason strip_block_tags
+# always runs first -- the substitution grows the text, so a cap on the unstripped file
+# bounds a smaller string than the one emitted.
+ISSUE_COMMENTS_JQ='[.[][]] | if length == 0 then "No PR conversation comments." else sort_by(.created_at) | map("--- \(.user.login) at \(.created_at)\n\((.body // "")[0:3000])") | join("\n") end'
+if CONVO_JSON=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate); then
+  CONVO=$(printf '%s' "$CONVO_JSON" | jq -s -r "$ISSUE_COMMENTS_JQ" 2>/dev/null) \
+    || CONVO="Could not parse PR conversation comments."
+else
+  echo "::warning::Could not read PR conversation comments."
+  CONVO="Could not read PR conversation comments."
+fi
+CONVO_FILE="${RUNNER_TEMP}/pr-conversation.md"
+printf '%s\n' "$CONVO" | strip_block_tags > "$CONVO_FILE"
+cap_file_escaped "$CONVO_FILE" "$CONVO_MAX_BYTES" \
+  "${NOTICE_CONVO}; read the rest with gh pr view"
+# What the block will really cost, heading included, rather than what it was allowed to.
+CONVO_BYTES=$(($(escaped_bytes "$CONVO_FILE") + 100))
+
 DIFF_FILE="${RUNNER_TEMP}/pr.diff"
 if fetch_raw "$DIFF_FILE" pr diff "$PR_NUMBER" --repo "$REPO"; then
   DIFF_LINES=$(awk 'END {print NR}' "$DIFF_FILE")
+  # What is left of the byte budget for this block: the whole allowance, less what the
+  # blocks above already spent, less the conversation still to be written. Measured on the
+  # stripped text on both sides, because strip_block_tags grows `<pr_context>` from 12
+  # bytes to 19 and it is the emitted string that has to fit -- the same reason the cap at
+  # the end of this file strips before it measures.
+  strip_block_tags < "$CTX" > "${RUNNER_TEMP}/fit-ctx"
+  strip_block_tags < "$DIFF_FILE" > "${RUNNER_TEMP}/fit-diff"
+  DIFF_ALLOWANCE=$((CTX_MAX_BYTES - $(escaped_bytes "${RUNNER_TEMP}/fit-ctx") - CONVO_BYTES))
+  DIFF_ESCAPED=$(escaped_bytes "${RUNNER_TEMP}/fit-diff")
+  # Set in the omission branch below and read after the group command. `{ ... } >> file` is
+  # a group, not a subshell, so the assignment survives -- which is the point: spelling the
+  # condition a second time thirty lines down leaves the two free to drift, and the drift is
+  # silent in exactly the direction that matters. The block would render the omission text
+  # while the annotation said nothing, or the reverse, which is the invisible failure this
+  # annotation exists to end.
+  DIFF_OMITTED=0
   {
     echo
     echo "## Full diff"
@@ -592,43 +749,67 @@ if fetch_raw "$DIFF_FILE" pr diff "$PR_NUMBER" --repo "$REPO"; then
     if [ "$DIFF_LINES" -eq 0 ]; then
       echo "The diff came back empty. That is unusual for a pull request; treat it"
       echo "as missing rather than as \"nothing changed\" and run gh pr diff."
+    elif [ "$DIFF_LINES" -le "$FULL_DIFF_MAX" ] && [ "$DIFF_ESCAPED" -le "$DIFF_ALLOWANCE" ]; then
+      cat "$DIFF_FILE"
     else
-      head -n "$FULL_DIFF_MAX" "$DIFF_FILE"
-      if [ "$DIFF_LINES" -gt "$FULL_DIFF_MAX" ]; then
-        echo "(${NOTICE_LINES} ${FULL_DIFF_MAX} of ${DIFF_LINES} lines; run gh pr diff for the rest)"
-      fi
+      # All or nothing, and this is the nothing. A prefix of a patch is worse than no
+      # patch: it reads as the whole thing. What survives a cut is whichever files sort
+      # first rather than whichever matter, and the notice saying so used to be one line
+      # at the end of a context the reviewer had already read past. Across two weeks of
+      # production runs, 108 had their context cut and only 23% re-fetched anything; the
+      # ones that did found 1.91 issues per run against 0.92 for the ones that did not,
+      # and 40% of the cut runs on PRs over 1,000 lines posted no finding at all.
+      #
+      # Omitting is only affordable because this is the one diff block the reviewer can
+      # replace by itself: `gh pr diff` is allowlisted and was refused 0 times in 54
+      # attempts over those two weeks. The since-diff above keeps its prefix precisely
+      # because it has no such escape -- `gh api .../compare` is not allowlisted, so
+      # trading its prefix for a notice would trade partial information for none.
+      DIFF_OMITTED=1
+      echo "(${NOTICE_OMITTED}; ${DIFF_LINES} lines)"
+      echo
+      echo "The patch is NOT below. Nothing has been shown to you and nothing has been"
+      echo "summarised. Do not review, approve or draw any conclusion about this pull"
+      echo "request from the blocks above alone."
+      echo
+      echo "Get it before you review:"
+      echo "  - gh pr diff ${PR_NUMBER} --repo ${REPO} for the whole patch."
+      echo "  - If that is too large to read at once, work from the '## Changed files'"
+      echo "    list above -- it names every path with its own +/- counts -- and Read"
+      echo "    those files from the checkout."
+      echo "  - Say in your review that the diff was omitted and which files you read."
     fi
   } >> "$CTX"
+  if [ "$DIFF_OMITTED" -eq 1 ]; then
+    # A notice, not a warning, for the same reason the byte cap below uses one: a
+    # generated-file PR reaches this legitimately and a warning that cried regression on
+    # every one of them would stop being read. It exists so an operator reading a thin
+    # review can see the reviewer was never handed the patch -- the failure mode this
+    # block replaced was invisible, because a line-capped diff said so only in a
+    # parenthetical and never in an annotation.
+    echo "::notice::Full diff omitted from the review prompt: ${DIFF_LINES} lines, ${DIFF_ESCAPED} escaped bytes against a ${DIFF_ALLOWANCE} byte allowance and a ${FULL_DIFF_MAX} line cap."
+  fi
 else
   echo "::warning::Could not read the diff."
   { echo; echo "## Full diff"; echo "Could not read the diff; run gh pr diff."; } >> "$CTX"
 fi
 
-# Issue comments, not the pull comments above: the PR conversation is a separate
-# endpoint from the inline review threads, and only the threads were ever passed.
-ISSUE_COMMENTS_JQ='[.[][]] | if length == 0 then "No PR conversation comments." else sort_by(.created_at) | map("--- \(.user.login) at \(.created_at)\n\((.body // "")[0:3000])") | join("\n") end'
-if CONVO_JSON=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate); then
-  CONVO=$(printf '%s' "$CONVO_JSON" | jq -s -r "$ISSUE_COMMENTS_JQ" 2>/dev/null) \
-    || CONVO="Could not parse PR conversation comments."
-else
-  echo "::warning::Could not read PR conversation comments."
-  CONVO="Could not read PR conversation comments."
-fi
-{ echo; echo "## PR conversation"; printf '%s\n' "$CONVO"; } >> "$CTX"
+# Written last, prepared above the full diff. The ordering argument for writing it last is
+# unchanged -- it is the block the reviewer can most afford to lose. But the diff's fit
+# decision has to subtract what this block will actually weigh, and a reserve of
+# CONVO_MAX_BYTES is not that: the common case is "No PR conversation comments.", 29 bytes,
+# and reserving an eighth of the budget against it hands back around 1,200 patch lines that
+# nothing will spend. That over-reserve was cheap while the shortfall cost the diff a
+# prefix; now it costs the whole block, so it would convert directly into omissions on pull
+# requests whose diff would have fit. Fetching here and measuring the capped file makes the
+# reserve exact. This endpoint does not depend on the diff, so nothing else moves.
+{ echo; echo "## PR conversation"; cat "$CONVO_FILE"; } >> "$CTX"
 
-# The bound that keeps the assembled prompt inside MAX_ARG_STRLEN. Context gets what
-# the threads block did not spend; threads is capped and written by this point, so its
-# final size is known rather than assumed. The per-block caps above still matter -- they
-# decide *what* survives truncation, and they keep any one block from arriving here
-# having already crowded out the diff -- but this is what makes the total fit.
-THREADS_BYTES=$(escaped_bytes "$THREADS_FILE")
-CTX_MAX_BYTES=$((PROMPT_BUDGET - THREADS_BYTES))
-# Unreachable while THREADS_MAX_BYTES is clamped to half the budget. Kept because the
-# alternative if that clamp is ever loosened is `head -c` with a negative count, and an
-# empty context degrades a review where a failing cap_file loses it entirely.
-if [ "$CTX_MAX_BYTES" -lt 0 ]; then
-  CTX_MAX_BYTES=0
-fi
+# CTX_MAX_BYTES is derived above, beside the threads cap it is computed from, because the
+# full diff block reads it. The per-block caps still matter -- they decide *what* survives,
+# and they keep any one block from arriving here having already crowded out the diff -- but
+# what follows is what makes the total fit.
+#
 # Stripped before the cap, for the same reason as the threads block above: the
 # substitution grows `<pr_context>` from 12 bytes to 19, so a cap applied to the
 # unstripped file bounds a smaller string than the one actually emitted. This is the
