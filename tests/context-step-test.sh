@@ -896,6 +896,28 @@ fi
 expect_context '^## Full diff' "the diff block survives three jobs of enormous logs"
 expect_context '^\+line 1$' "the diff body survives three jobs of enormous logs"
 
+# The same three jobs beside a maxed review history, which is where the log allowance's
+# denominator shows. A quarter of PROMPT_BUDGET is *half* the context once threads is at its
+# own cap, and cap_log_excerpt charges raw bytes rather than escaped, so the excerpts arrive
+# larger than they were counted. The blocks written after them are what pays: the
+# conversation, and the full diff's omission instructions -- the text the shares exist to
+# protect. The diff is oversized here so that text is what has to be present.
+# The since-diff is dense here too, at its own half of the context: a log allowance that is
+# a quarter of the *budget* is another half, and the two together are the whole of it before
+# the changed-file list and the conversation are written. That sum is the run, and it is why
+# both shares have to read off the same denominator -- fixing either alone leaves the other
+# free to spend what the first gave back.
+STUB_THREAD_COMMENTS=60 STUB_FAILING_JOBS=3 STUB_JOB_LOG="$FAT_LOG" STUB_DIFF_LINES=4000 \
+  STUB_SINCE_LINES=2000 STUB_SINCE_STYLE=json \
+  run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on three fat logs beside a long history"
+expect_context 'full diff omitted: too large for the review prompt' \
+  "the omission notice survives three fat logs and a long history"
+expect_context 'The patch is NOT below' \
+  "the omission instructions survive three fat logs and a long history"
+expect_context '^## PR conversation' \
+  "the conversation survives three fat logs and a long history"
+
 # Sharing a budget decides *what* the excerpts spend it on, and the region total above cannot
 # see that. The summary is written first and the first-error window second, but the window is
 # the block worth the most: across five real failed logs the cause sat immediately above the

@@ -155,19 +155,18 @@ fi
 # tail, so the diff is the block that paid: three verbose failing jobs took it out of
 # the context entirely. 40000 was sized against the old 200 KB context cap, so the
 # allowance is scaled off PROMPT_BUDGET like THREADS_MAX_BYTES instead. It is not also
-# kept as a per-excerpt cap: a quarter of the budget is around 30 KB, so 40000 could
+# kept as a per-excerpt cap: a quarter of the context is around 15 KB, so 40000 could
 # never be the binding number and stating it would only imply a second bound that does
 # not exist.
-LOG_BUDGET=$((PROMPT_BUDGET / 4))
-LOG_REMAINING=$LOG_BUDGET
-# What the summary may take of it. The excerpts are written summary first, window
-# second, but the window is the block worth more: across five real failed job logs the
-# cause sat immediately above the first ##[error] in four, and the summary is what
-# covers the fifth. Sharing an allowance first-come-first-served would invert that --
-# `tail -n 20` bounds the summary in lines, not bytes, so twenty stack-trace or JSON
-# lines take everything and the window for the same job renders as its own truncation
-# notice. Held to a quarter so the window keeps the larger share of whatever is left.
-LOG_SUMMARY_MAX=$((LOG_BUDGET / 4))
+#
+# Derived below, beside CTX_MAX_BYTES, rather than here: like the conversation, the
+# changed-file list and the since-diff, this share is of the context these excerpts are
+# written into and not of the whole prompt budget. A quarter of PROMPT_BUDGET is *half* the
+# context once threads is at its own cap, and it is charged raw rather than escaped --
+# cap_log_excerpt bills through wc -c -- so at the 1.20x this file measures for
+# quote-dense text those bytes arrive larger than they were counted. Three verbose failing
+# jobs beside a long review history is the run where that lands on the tail cut, and what
+# the tail cut takes is the conversation and then the full diff's omission instructions.
 # The truncation notices, as constants rather than literals at their call sites. The
 # prompt document quotes them and tells the reviewer that seeing one means the block is
 # incomplete and the rest has to be fetched before drawing conclusions from it -- so a
@@ -419,12 +418,27 @@ fi
 # Denominated in CTX_MAX_BYTES rather than PROMPT_BUDGET, which is why it is derived here
 # and not beside the other caps: an eighth of the larger total is a quarter of the context
 # once threads is at its own cap, and a share that grows when the review history grows is
-# not a share. The same reading applies to the changed-file and since-diff caps below.
+# not a share. Every per-block share of the context reads the same way -- the log allowance
+# below, the changed-file list, and the since-diff. Only threads is a share of
+# PROMPT_BUDGET, because it is the block CTX_MAX_BYTES is derived by subtracting.
 #
 # Bounding it is also what makes the full diff's fit decision answerable. That decision
 # asks "is there room for the whole patch", and the question has no answer while an
 # unbounded block is still to come.
 CONVO_MAX_BYTES=$((CTX_MAX_BYTES / 8))
+# The log allowance, for the reasons given where LOG_WINDOW is set. Same denominator, same
+# argument: these excerpts are written into the context, so the context is what they are a
+# share of.
+LOG_BUDGET=$((CTX_MAX_BYTES / 4))
+LOG_REMAINING=$LOG_BUDGET
+# What the summary may take of it. The excerpts are written summary first, window
+# second, but the window is the block worth more: across five real failed job logs the
+# cause sat immediately above the first ##[error] in four, and the summary is what
+# covers the fifth. Sharing an allowance first-come-first-served would invert that --
+# `tail -n 20` bounds the summary in lines, not bytes, so twenty stack-trace or JSON
+# lines take everything and the window for the same job renders as its own truncation
+# notice. Held to a quarter so the window keeps the larger share of whatever is left.
+LOG_SUMMARY_MAX=$((LOG_BUDGET / 4))
 
 DELIMITER="REVIEW_CONTEXT_$(openssl rand -hex 16)"
 {
@@ -486,7 +500,7 @@ fi
 # file is around 60 bytes -- 180 KB, over the whole budget, from a block with no cap of its
 # own. It matters more than its size suggests: this is the block the full diff's omission
 # notice sends the reviewer to, so it is the last one that should be able to overflow. An
-# eighth of the budget, the same share as the conversation.
+# eighth of the context, the same share as the conversation.
 FILES_FILE="${RUNNER_TEMP}/changed-files.md"
 printf '%s\n' "$FILES" | strip_block_tags > "$FILES_FILE"
 cap_file_escaped "$FILES_FILE" $((CTX_MAX_BYTES / 8)) \
