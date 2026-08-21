@@ -36,12 +36,27 @@ comments", which are claims rather than gaps, so those failures are disclosed to
 there once skipped the review step and the notify step with it, leaving the PR with no review and no
 explanation.
 
-Both step outputs are byte-bounded (100 KB of comment threads, 200 KB of context), with per-block
-caps beneath that — 3,000 diff lines, 40 KB per CI log excerpt, 3,000 characters per comment. The
-caps are deliberately far below any plausible runner limit: 400 inline comments rendered 1.1 MB of
-threads before they existed, and the runner accounts for output size in UTF-16, so a byte count here
-is not the number it checks against. Blocks are ordered so that truncation sacrifices the PR
-conversation before the diff or the CI status.
+Both step outputs are interpolated into one `prompt:` string, so the binding limit is the kernel's
+`MAX_ARG_STRLEN` (131,072) on the SUM of them, not a per-output cap — past it `exec` fails with
+"Argument list too long" while the action still reports success. The budget is denominated in
+*escaped* bytes, because the action carries the prompt a second time inside `toJson(inputs)` and the
+escaped copy is the larger one: a Grafana dashboard PR measured 123,401 raw bytes and 135,366
+escaped, and failed on two consecutive pushes. Beneath that total each block holds a share — comment
+threads at most half, CI log excerpts a quarter, the PR conversation an eighth, and the two diff
+blocks sharing 3,000 patch lines.
+
+The full diff is all-or-nothing. It renders whole or it is replaced by a notice naming its size and
+telling the reviewer to run `gh pr diff`. A prefix reads as the whole patch: what survives a cut is
+whichever files sort first rather than whichever matter. Across two weeks of production runs, 108 had
+their context cut and only 23% re-fetched anything — the ones that did found 1.91 issues per run
+against 0.92 for the ones that did not, and 40% of the cut runs on PRs over 1,000 lines posted no
+finding at all. Omitting is affordable for this block alone, because it is the only diff the reviewer
+can replace itself: `gh pr diff` is allowlisted and was refused 0 times in 54 attempts. The
+since-last-review diff keeps its prefix for the same reason inverted — `gh api .../compare` is not
+allowlisted, so trading its prefix for a notice would trade partial information for none.
+
+With every block bounded, the tail cut on the assembled context is a backstop rather than the
+ordinary path; the PR body is the one block with no cap of its own, and it is what still reaches it.
 
 Everything reaching the prompt is attacker-controlled — title, body, diff, CI logs, comments — so the
 block delimiters are neutralised by shape rather than by exact string: `</pr_context >`,
