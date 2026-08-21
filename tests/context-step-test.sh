@@ -907,16 +907,55 @@ expect_context '^\+line 1$' "the diff body survives three jobs of enormous logs"
 # the changed-file list and the conversation are written. That sum is the run, and it is why
 # both shares have to read off the same denominator -- fixing either alone leaves the other
 # free to spend what the first gave back.
+# Every capped block at its ceiling simultaneously, which is what makes the shares' *sum*
+# the quantity under test rather than any one of them. When they summed to exactly 1 --
+# since-diff CTX/2, logs CTX/4, files CTX/8, conversation CTX/8 -- there was no headroom
+# left for the PR body, the commits, the CI list, the headings or the diff, and the log
+# share spent more than it was charged because it billed raw where everything else billed
+# escaped. `DIFF_ALLOWANCE` goes negative on this run, so the diff correctly omits itself;
+# the context was over budget before the omission text and `## PR conversation` were
+# written, and the tail cut takes those bottom-up. What it leaves is a `## Full diff`
+# heading with the context-truncation notice under it -- a heading with nothing beneath it,
+# which the empty-diff branch exists to prevent by another route.
 STUB_THREAD_COMMENTS=60 STUB_FAILING_JOBS=3 STUB_JOB_LOG="$FAT_LOG" STUB_DIFF_LINES=4000 \
-  STUB_SINCE_LINES=2000 STUB_SINCE_STYLE=json \
+  STUB_SINCE_LINES=2000 STUB_SINCE_STYLE=json STUB_FILES=3000 STUB_CONVO_COMMENTS=300 \
   run_step > "$WORK/code.txt"
-expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on three fat logs beside a long history"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 with every capped block at its ceiling"
 expect_context 'full diff omitted: too large for the review prompt' \
-  "the omission notice survives three fat logs and a long history"
+  "the omission notice survives every block at its ceiling"
 expect_context 'The patch is NOT below' \
-  "the omission instructions survive three fat logs and a long history"
+  "the omission instructions survive every block at its ceiling"
 expect_context '^## PR conversation' \
-  "the conversation survives three fat logs and a long history"
+  "the conversation survives every block at its ceiling"
+# The sum, stated as a margin rather than as a pass/fail against the limit. Boundedness is
+# too weak to be the assertion here: with the shares summing to exactly 1 this run measured
+# 58,397 escaped against an allowance of 60,356 -- inside it, but by 3%, and only because
+# cap_file_escaped hands back 300 bytes a call and undershoots its target by 2%. A worst case
+# that clears by rounding error is one comment line from the tail cut, and the argument for
+# having per-block shares at all is that the tail cut stays a backstop. The same run now
+# measures around 40,600, near 67% of the allowance.
+#
+# The allowance is derived the way the script derives it, from the same declared constants,
+# so a prompt document that grows or a share that is widened moves this number here too
+# rather than silently spending the margin.
+maxed_ctx=$(escaped_of "$CTX_FILE")
+maxed_threads=$(escaped_of "$THREADS_FILE_OUT")
+# Read out of the script, not repeated here, for the reason the wrapper assertion further
+# down reads its constant the same way: a second copy of a budget term drifts from the first.
+maxed_wrapper=$(sed -n 's/^PROMPT_WRAPPER_BYTES=\([0-9]*\)$/\1/p' "$CONTEXT_SCRIPT")
+maxed_allowance=$((PROMPT_ARG_LIMIT - ALL_INPUTS_OTHER_BYTES - maxed_wrapper \
+  - $(escaped_of docs/claude-pr-review-prompt.md) - 1024 - maxed_threads))
+maxed_pct=$((maxed_ctx * 100 / maxed_allowance))
+if [ "$maxed_pct" -le 85 ]; then
+  echo "ok   every block at its ceiling leaves headroom (${maxed_pct}% of the allowance used)"
+else
+  echo "FAIL every capped block at its ceiling leaves no headroom for the uncapped ones:"
+  printf '     %s escaped bytes against a %s byte allowance (%s%%), threads at %s\n' \
+    "$maxed_ctx" "$maxed_allowance" "$maxed_pct" "$maxed_threads"
+  printf '     the per-block shares of the context sum too close to 1; the tail cut is the\n'
+  printf '     ordinary path on this run rather than a backstop\n'
+  failures=$((failures + 1))
+fi
 
 # Sharing a budget decides *what* the excerpts spend it on, and the region total above cannot
 # see that. The summary is written first and the first-error window second, but the window is

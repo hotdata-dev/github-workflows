@@ -180,6 +180,7 @@ NOTICE_LOG='log excerpt truncated'
 NOTICE_LINES='truncated: first'
 NOTICE_CONVO='PR conversation truncated'
 NOTICE_FILES='changed file list truncated'
+NOTICE_COMMITS='commit list truncated'
 NOTICE_SINCE='since-diff cut to fit the review prompt'
 # Not a truncation notice: this block is absent, not short. It is listed with the others
 # because the contract is the same -- the prompt document has to quote it, or the reviewer
@@ -230,9 +231,14 @@ cap_log_excerpt() {
       echo "($2)" >> "$1"
     fi
   else
-    cap_file "$1" "$limit" "$2"
+    # Escaped, like every other cap in this file. Billing raw `wc -c` against a share of a
+    # budget denominated in escaped bytes under-charged by whatever the content's expansion
+    # is -- about 1.20x for the quote-dense text a CI log is full of -- so an allowance of
+    # a quarter of the context arrived as nearer a third of it, and the blocks written after
+    # these excerpts paid the difference.
+    cap_file_escaped "$1" "$limit" "$2"
   fi
-  LOG_REMAINING=$((LOG_REMAINING - $(wc -c < "$1" | tr -d ' ')))
+  LOG_REMAINING=$((LOG_REMAINING - $(escaped_bytes "$1")))
   if [ "$LOG_REMAINING" -lt 0 ]; then LOG_REMAINING=0; fi
 }
 
@@ -429,7 +435,7 @@ CONVO_MAX_BYTES=$((CTX_MAX_BYTES / 8))
 # The log allowance, for the reasons given where LOG_WINDOW is set. Same denominator, same
 # argument: these excerpts are written into the context, so the context is what they are a
 # share of.
-LOG_BUDGET=$((CTX_MAX_BYTES / 4))
+LOG_BUDGET=$((CTX_MAX_BYTES / 8))
 LOG_REMAINING=$LOG_BUDGET
 # What the summary may take of it. The excerpts are written summary first, window
 # second, but the window is the block worth more: across five real failed job logs the
@@ -482,7 +488,17 @@ else
   echo "::warning::Could not read commits."
   COMMITS="Could not read commits."
 fi
-{ echo; echo "## Commits"; printf '%s\n' "$COMMITS"; } >> "$CTX"
+# Capped for the same reason as the changed-file list below, and it was the last fetched
+# block without one. The endpoint tops out at 250 commits, so the ordinary ceiling is around
+# 15 KB -- already a quarter of the context on a maxed-threads run -- but the rendered line
+# is a SHA and a git subject, and a git subject has no length bound, so the real ceiling is
+# whatever the author wrote. It sits above `## Full diff`, so an overflow here is paid for by
+# the omission notice and the conversation.
+COMMITS_FILE="${RUNNER_TEMP}/commits.md"
+printf '%s\n' "$COMMITS" | strip_block_tags > "$COMMITS_FILE"
+cap_file_escaped "$COMMITS_FILE" $((CTX_MAX_BYTES / 8)) \
+  "${NOTICE_COMMITS}; read the rest with gh pr view --json commits"
+{ echo; echo "## Commits"; cat "$COMMITS_FILE"; } >> "$CTX"
 
 # status carries added/modified/removed/renamed, which the raw patch does not spell
 # out for renames, and the per-file counts let the reviewer budget its reading.
@@ -647,7 +663,7 @@ if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" != "null" ] && [ "$LAST_SHA" != "$HEAD_SH
     # printed "truncated: first 2000 of 1500 lines" -- a claim about a cut that did not
     # happen, naming a figure the reviewer was not given. These notices are a contract
     # with the prompt document; one of them stating a falsehood is worse than none.
-    cap_file_escaped "$SINCE_CAPPED" $((CTX_MAX_BYTES / 2)) \
+    cap_file_escaped "$SINCE_CAPPED" $((CTX_MAX_BYTES / 3)) \
       "${NOTICE_SINCE}; read the whole patch with gh pr diff"
     # Recounted after both caps, because this is what the full diff is charged for. Fixing
     # it at min(SINCE_LINES, SINCE_MAX) before the byte cap charged the full diff for lines

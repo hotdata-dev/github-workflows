@@ -43,11 +43,14 @@ Both step outputs are interpolated into one `prompt:` string, so the binding lim
 escaped copy is the larger one: a Grafana dashboard PR measured 123,401 raw bytes and 135,366
 escaped, and failed on two consecutive pushes. Comment threads take at most half of that total, and
 what is left is the context allowance; every other block holds a share of *that* — the since-last-review
-diff at most half, CI log excerpts a quarter, the PR conversation and the changed-file list an eighth
-each — with the two diff blocks also sharing 3,000 patch lines. The denominator is the point: a share
-of the whole budget is twice the share it claims to be once the review history is long, which is
-precisely the case where blocks compete. A line cap is also not a byte cap: at the 1.20x a quote-dense
-patch costs, 2,000 lines of dashboard JSON is about 120 KB escaped, so the since-diff needs both.
+diff a third, and CI log excerpts, the PR conversation, the changed-file list and the commit list an
+eighth each — with the two diff blocks also sharing 3,000 patch lines. Two things about those shares
+are load-bearing. The denominator: a share of the whole budget is twice the share it claims to be once
+the review history is long, which is precisely when blocks compete. And the sum: it is around
+two-thirds, because shares adding to exactly 1 leave nothing for the PR body, the CI list or the
+headings, and a worst case that clears the limit by rounding error is not a backstop. A line cap is
+also not a byte cap — at the 1.20x a quote-dense patch costs, 2,000 lines of dashboard JSON is about
+120 KB escaped — so the since-diff needs both, and every block is charged escaped.
 
 The full diff is all-or-nothing. It renders whole or it is replaced by a notice naming its size and
 telling the reviewer to run `gh pr diff`. A prefix reads as the whole patch: what survives a cut is
