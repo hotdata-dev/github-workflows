@@ -474,7 +474,16 @@ else
   echo "::warning::Could not read changed files."
   FILES="Could not read changed files."
 fi
-{ echo; echo "## Changed files"; printf '%s\n' "$FILES"; } >> "$CTX"
+# Capped, because `--paginate` returns up to GitHub's 3,000-file ceiling and a line per
+# file is around 60 bytes -- 180 KB, over the whole budget, from a block with no cap of its
+# own. It matters more than its size suggests: this is the block the full diff's omission
+# notice sends the reviewer to, so it is the last one that should be able to overflow. An
+# eighth of the budget, the same share as the conversation.
+FILES_FILE="${RUNNER_TEMP}/changed-files.md"
+printf '%s\n' "$FILES" | strip_block_tags > "$FILES_FILE"
+cap_file_escaped "$FILES_FILE" $((PROMPT_BUDGET / 8)) \
+  "changed file list truncated; read the rest with gh pr view --json files"
+{ echo; echo "## Changed files"; cat "$FILES_FILE"; } >> "$CTX"
 
 # The reviewer cannot run tests -- no dependencies are installed and the allowlist
 # would refuse anyway -- but CI already ran them. Whether they passed is the one
@@ -587,13 +596,30 @@ if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" != "null" ] && [ "$LAST_SHA" != "$HEAD_SH
     SINCE_LINES=$(awk 'END {print NR}' "$SINCE_FILE")
     SINCE_USED=$SINCE_LINES
     if [ "$SINCE_USED" -gt "$SINCE_MAX" ]; then SINCE_USED=$SINCE_MAX; fi
+    # Line-capped and then byte-capped, because a line cap does not bound bytes: at the
+    # 1.20x this file measures for quote-dense JSON, 2,000 lines of dashboard patch is
+    # about 120 KB escaped, which is over CTX_MAX_BYTES on its own. This block is written
+    # *above* the full diff, so without the byte cap it is the block that drives the tail
+    # cut on a cycle-2+ generated-file PR -- and what the tail cut then removes is the
+    # full diff's omission notice and the conversation, not the since-diff that spent the
+    # budget. Half the budget, the same share the threads block gets, so the pair of
+    # blocks the reviewer cannot re-fetch can never crowd out everything else together.
+    #
+    # cap_file_escaped rather than a smaller SINCE_MAX: the prefix is still what this
+    # block wants, for the reason the full diff below no longer keeps one -- `gh api
+    # .../compare` is not allowlisted, so a notice in place of this patch leaves the
+    # reviewer nothing it can fetch instead.
+    SINCE_CAPPED="${RUNNER_TEMP}/since-capped.diff"
+    head -n "$SINCE_MAX" "$SINCE_FILE" > "$SINCE_CAPPED"
+    if [ "$SINCE_LINES" -gt "$SINCE_MAX" ]; then
+      echo "(${NOTICE_LINES} ${SINCE_MAX} of ${SINCE_LINES} lines)" >> "$SINCE_CAPPED"
+    fi
+    cap_file_escaped "$SINCE_CAPPED" $((PROMPT_BUDGET / 2)) \
+      "${NOTICE_LINES} ${SINCE_MAX} of ${SINCE_LINES} lines, then cut to fit the prompt"
     {
       echo
       echo "## Diff since your last review (${LAST_SHA} to ${HEAD_SHA})"
-      head -n "$SINCE_MAX" "$SINCE_FILE"
-      if [ "$SINCE_LINES" -gt "$SINCE_MAX" ]; then
-        echo "(${NOTICE_LINES} ${SINCE_MAX} of ${SINCE_LINES} lines)"
-      fi
+      cat "$SINCE_CAPPED"
     } >> "$CTX"
   else
     {
@@ -614,6 +640,31 @@ fi
 FULL_DIFF_MAX=$((DIFF_BUDGET_LINES - SINCE_USED))
 if [ "$FULL_DIFF_MAX" -gt "$DIFF_MAX" ]; then FULL_DIFF_MAX=$DIFF_MAX; fi
 
+# Issue comments, not the pull comments above: the PR conversation is a separate
+# endpoint from the inline review threads, and only the threads were ever passed.
+#
+# Fetched and capped here, above the full diff, and written below it -- see the write site
+# for why the two are separated. Capped in its own file rather than appended straight to
+# $CTX, so the cap is on this block and not on the whole context: appending first and
+# capping after is the tail cut, which is what put this block's heading off the end of the
+# prompt on www.hotdata.dev#332. Stripped before the cap for the reason strip_block_tags
+# always runs first -- the substitution grows the text, so a cap on the unstripped file
+# bounds a smaller string than the one emitted.
+ISSUE_COMMENTS_JQ='[.[][]] | if length == 0 then "No PR conversation comments." else sort_by(.created_at) | map("--- \(.user.login) at \(.created_at)\n\((.body // "")[0:3000])") | join("\n") end'
+if CONVO_JSON=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate); then
+  CONVO=$(printf '%s' "$CONVO_JSON" | jq -s -r "$ISSUE_COMMENTS_JQ" 2>/dev/null) \
+    || CONVO="Could not parse PR conversation comments."
+else
+  echo "::warning::Could not read PR conversation comments."
+  CONVO="Could not read PR conversation comments."
+fi
+CONVO_FILE="${RUNNER_TEMP}/pr-conversation.md"
+printf '%s\n' "$CONVO" | strip_block_tags > "$CONVO_FILE"
+cap_file_escaped "$CONVO_FILE" "$CONVO_MAX_BYTES" \
+  "${NOTICE_CONVO}; read the rest with gh pr view"
+# What the block will really cost, heading included, rather than what it was allowed to.
+CONVO_BYTES=$(($(escaped_bytes "$CONVO_FILE") + 100))
+
 DIFF_FILE="${RUNNER_TEMP}/pr.diff"
 if fetch_raw "$DIFF_FILE" pr diff "$PR_NUMBER" --repo "$REPO"; then
   DIFF_LINES=$(awk 'END {print NR}' "$DIFF_FILE")
@@ -624,8 +675,15 @@ if fetch_raw "$DIFF_FILE" pr diff "$PR_NUMBER" --repo "$REPO"; then
   # the end of this file strips before it measures.
   strip_block_tags < "$CTX" > "${RUNNER_TEMP}/fit-ctx"
   strip_block_tags < "$DIFF_FILE" > "${RUNNER_TEMP}/fit-diff"
-  DIFF_ALLOWANCE=$((CTX_MAX_BYTES - $(escaped_bytes "${RUNNER_TEMP}/fit-ctx") - CONVO_MAX_BYTES))
+  DIFF_ALLOWANCE=$((CTX_MAX_BYTES - $(escaped_bytes "${RUNNER_TEMP}/fit-ctx") - CONVO_BYTES))
   DIFF_ESCAPED=$(escaped_bytes "${RUNNER_TEMP}/fit-diff")
+  # Set in the omission branch below and read after the group command. `{ ... } >> file` is
+  # a group, not a subshell, so the assignment survives -- which is the point: spelling the
+  # condition a second time thirty lines down leaves the two free to drift, and the drift is
+  # silent in exactly the direction that matters. The block would render the omission text
+  # while the annotation said nothing, or the reverse, which is the invisible failure this
+  # annotation exists to end.
+  DIFF_OMITTED=0
   {
     echo
     echo "## Full diff"
@@ -651,6 +709,7 @@ if fetch_raw "$DIFF_FILE" pr diff "$PR_NUMBER" --repo "$REPO"; then
       # attempts over those two weeks. The since-diff above keeps its prefix precisely
       # because it has no such escape -- `gh api .../compare` is not allowlisted, so
       # trading its prefix for a notice would trade partial information for none.
+      DIFF_OMITTED=1
       echo "(${NOTICE_OMITTED}; ${DIFF_LINES} lines)"
       echo
       echo "The patch is NOT below. Nothing has been shown to you and nothing has been"
@@ -665,8 +724,7 @@ if fetch_raw "$DIFF_FILE" pr diff "$PR_NUMBER" --repo "$REPO"; then
       echo "  - Say in your review that the diff was omitted and which files you read."
     fi
   } >> "$CTX"
-  if [ "$DIFF_LINES" -gt 0 ] \
-    && { [ "$DIFF_LINES" -gt "$FULL_DIFF_MAX" ] || [ "$DIFF_ESCAPED" -gt "$DIFF_ALLOWANCE" ]; }; then
+  if [ "$DIFF_OMITTED" -eq 1 ]; then
     # A notice, not a warning, for the same reason the byte cap below uses one: a
     # generated-file PR reaches this legitimately and a warning that cried regression on
     # every one of them would stop being read. It exists so an operator reading a thin
@@ -680,25 +738,15 @@ else
   { echo; echo "## Full diff"; echo "Could not read the diff; run gh pr diff."; } >> "$CTX"
 fi
 
-# Issue comments, not the pull comments above: the PR conversation is a separate
-# endpoint from the inline review threads, and only the threads were ever passed.
-ISSUE_COMMENTS_JQ='[.[][]] | if length == 0 then "No PR conversation comments." else sort_by(.created_at) | map("--- \(.user.login) at \(.created_at)\n\((.body // "")[0:3000])") | join("\n") end'
-if CONVO_JSON=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate); then
-  CONVO=$(printf '%s' "$CONVO_JSON" | jq -s -r "$ISSUE_COMMENTS_JQ" 2>/dev/null) \
-    || CONVO="Could not parse PR conversation comments."
-else
-  echo "::warning::Could not read PR conversation comments."
-  CONVO="Could not read PR conversation comments."
-fi
-# Capped in its own file rather than appended straight to $CTX, so the cap is on this block
-# and not on the whole context: appending first and capping after is the tail cut, which is
-# what put this block's heading off the end of the prompt on www.hotdata.dev#332. Stripped
-# before the cap for the reason strip_block_tags always runs first -- the substitution grows
-# the text, so a cap on the unstripped file bounds a smaller string than the one emitted.
-CONVO_FILE="${RUNNER_TEMP}/pr-conversation.md"
-printf '%s\n' "$CONVO" | strip_block_tags > "$CONVO_FILE"
-cap_file_escaped "$CONVO_FILE" "$CONVO_MAX_BYTES" \
-  "${NOTICE_CONVO}; read the rest with gh pr view"
+# Written last, prepared above the full diff. The ordering argument for writing it last is
+# unchanged -- it is the block the reviewer can most afford to lose. But the diff's fit
+# decision has to subtract what this block will actually weigh, and a reserve of
+# CONVO_MAX_BYTES is not that: the common case is "No PR conversation comments.", 29 bytes,
+# and reserving an eighth of the budget against it hands back around 1,200 patch lines that
+# nothing will spend. That over-reserve was cheap while the shortfall cost the diff a
+# prefix; now it costs the whole block, so it would convert directly into omissions on pull
+# requests whose diff would have fit. Fetching here and measuring the capped file makes the
+# reserve exact. This endpoint does not depend on the diff, so nothing else moves.
 { echo; echo "## PR conversation"; cat "$CONVO_FILE"; } >> "$CTX"
 
 # CTX_MAX_BYTES is derived above, beside the threads cap it is computed from, because the

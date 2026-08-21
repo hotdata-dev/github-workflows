@@ -134,7 +134,25 @@ case "$args" in
     fi
     ;;
   *"/pulls/"*"/commits"*)  fail_if_marked commits; cat "$FIXTURES/pull-commits.json" ;;
-  *"/pulls/"*"/files"*)    fail_if_marked files; cat "$FIXTURES/pull-files.json" ;;
+  *"/pulls/"*"/files"*)
+    fail_if_marked files
+    # STUB_FILES reaches the far end of `--paginate` on this endpoint: GitHub returns up to
+    # 3,000 files, and the block renders a line each. The shipped fixture is the ordinary
+    # case and every other file assertion is written against it.
+    if [ "${STUB_FILES:-0}" -gt 0 ]; then
+      awk -v n="$STUB_FILES" 'BEGIN {
+        printf "[";
+        for (i = 0; i < n; i++) {
+          if (i) printf ",";
+          printf "{\"status\":\"modified\",\"additions\":%d,\"deletions\":%d,", i % 90, i % 7;
+          printf "\"filename\":\"packages/generated/module_%06d/src/deeply/nested/path/component_%06d.ts\"}", i, i;
+        }
+        printf "]\n";
+      }'
+    else
+      cat "$FIXTURES/pull-files.json"
+    fi
+    ;;
   *"/issues/"*"/comments"*)
     fail_if_marked issue_comments
     if [ "$STUB_CONVO_COMMENTS" -gt 0 ]; then
@@ -198,7 +216,18 @@ case "$args" in
         # Padding, so the since-diff can be made to compete with the full diff for the
         # shared line budget. Tagged distinctly from the full diff's "+line" so a test
         # can tell which block a rendered line came from.
-        awk -v n="$STUB_SINCE_LINES" 'BEGIN { for (i = 1; i <= n; i++) print "+since " i }'
+        #
+        # STUB_SINCE_STYLE is the since-diff's twin of STUB_DIFF_STYLE below, and it has to
+        # exist separately: SINCE_MAX bounds this block in lines only, so a test that wants
+        # to reach its *byte* cap needs long lines here, and a short "+since N" cannot get
+        # there at any line count SINCE_MAX permits.
+        awk -v n="$STUB_SINCE_LINES" -v style="$STUB_SINCE_STYLE" 'BEGIN {
+          for (i = 1; i <= n; i++) {
+            if (style == "json")
+              printf "+      \"since\": \"line %d, \\\"quoted\\\" text, and enough further payload on this line to make it dense\",\n", i;
+            else print "+since " i;
+          }
+        }'
         ;;
       *)
         printf '{"status":"%s","ahead_by":2,"behind_by":0}\n' "$COMPARE_STATUS"
@@ -257,6 +286,8 @@ run_step() {
     STUB_DIFF_TAGS="${STUB_DIFF_TAGS:-0}" \
     STUB_DIFF_STYLE="${STUB_DIFF_STYLE:-plain}" \
     STUB_SINCE_LINES="${STUB_SINCE_LINES:-0}" \
+    STUB_SINCE_STYLE="${STUB_SINCE_STYLE:-plain}" \
+    STUB_FILES="${STUB_FILES:-0}" \
     FAIL_ENDPOINT="${FAIL_ENDPOINT:-none}" \
     HEAD_SHA="${HEAD_SHA:-1d01475432236aa4fbca722aaaa2687c2b2e4947}" \
     BASE_REF=main \
@@ -626,6 +657,81 @@ expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a diff that fits"
 expect "$(grep -c '^+line ' "$CTX_FILE" || true)" "40" "a diff that fits is passed whole"
 expect_no_context 'full diff omitted' "a diff that fits carries no omission notice"
 
+# What the diff reserves for the conversation has to be what the conversation will weigh,
+# not what it was allowed to weigh. The common case is "No PR conversation comments." at 29
+# bytes; reserving an eighth of the budget against that hands back around 1,200 patch lines
+# that nothing will spend. Cheap while the shortfall cost the diff a prefix, and not cheap
+# now that it costs the whole block -- an over-reserve converts directly into omissions on
+# pull requests whose diff would have fit.
+#
+# 1,800 lines of quote-dense diff is inside that window: it fits beside an empty
+# conversation and not beside a conversation at its cap. A reserve that is a constant
+# cannot tell those two runs apart, so this pair is what pins the reserve to the real size.
+STUB_DIFF_LINES=1800 STUB_DIFF_STYLE=json run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a diff at the edge of its allowance"
+expect "$(grep -c 'description' "$CTX_FILE" || true)" "1800" \
+  "a diff inside the allowance renders whole when the conversation is empty"
+STUB_DIFF_LINES=1800 STUB_DIFF_STYLE=json STUB_CONVO_COMMENTS=300 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on the same diff beside a full conversation"
+expect_context 'full diff omitted: too large for the review prompt' \
+  "the same diff is omitted once the conversation really needs its share"
+
+# The annotation and the block have to agree. They used to be two spellings of the same
+# condition thirty lines apart, free to drift into a context that says the diff is absent
+# while the run reports nothing, or the reverse -- which is the invisible failure the
+# annotation exists to end. `{ ... } >> file` is a group command, not a subshell, so the
+# flag set inside it is what both readers use.
+STUB_DIFF_LINES=4000 run_step > /dev/null
+if grep -q 'full diff omitted' "$CTX_FILE" \
+  && grep -q '::notice::Full diff omitted from the review prompt' "$WORK/step.out"; then
+  echo "ok   an omitted diff is annotated as well as announced in the context"
+else
+  echo "FAIL the omission notice and the ::notice:: annotation disagree:"
+  printf '     context says omitted: %s, annotation present: %s\n' \
+    "$(grep -q 'full diff omitted' "$CTX_FILE" && echo yes || echo no)" \
+    "$(grep -q '::notice::Full diff omitted' "$WORK/step.out" && echo yes || echo no)"
+  failures=$((failures + 1))
+fi
+STUB_DIFF_LINES=40 run_step > /dev/null
+if grep -q '::notice::Full diff omitted' "$WORK/step.out"; then
+  echo "FAIL a diff that was passed whole was annotated as omitted"
+  failures=$((failures + 1))
+else
+  echo "ok   a diff that fits is not annotated as omitted"
+fi
+
+# The two blocks above the diff that had no byte cap of their own. Both are written before
+# `## Full diff`, so an overflow in either is paid for by the diff's omission notice and the
+# conversation -- the tail cut works from the end, and they do not sit at the end.
+#
+# The since-diff is the sharper of the two: SINCE_MAX bounds it in lines, and at the 1.20x
+# this budget measures for quote-dense patches, 2,000 lines of dashboard JSON is about 120
+# KB escaped, over CTX_MAX_BYTES on its own. So on any cycle-2+ generated-file PR that one
+# block drove the tail cut.
+STUB_SINCE_LINES=2000 STUB_SINCE_STYLE=json run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a since-diff that is huge in bytes"
+expect_context '^## Diff since your last review' "the since-diff block renders"
+expect_context '^\+      "since": "line 1' "the since-diff keeps a prefix rather than a notice"
+expect_context 'cut to fit the prompt' "an over-byte since-diff says it was cut"
+# The blocks written after it, which are what the tail cut would have taken instead.
+expect_context '^## Full diff' "the full diff heading survives a byte-heavy since-diff"
+expect_context '^## PR conversation' "the conversation survives a byte-heavy since-diff"
+expect "$(escaped_of "$CTX_FILE" \
+  | awk -v lim="$PROMPT_ARG_LIMIT" '{print ($1 <= lim) ? "bounded" : "over"}')" \
+  "bounded" "a byte-heavy since-diff stays inside the argument limit"
+
+# The changed-file list, the other block with no byte cap and the one the omission notice
+# sends the reviewer to. `--paginate` returns up to GitHub's 3,000-file ceiling at around
+# 60 bytes a line.
+STUB_FILES=3000 run_step > "$WORK/code.txt"
+expect "$(cat "$WORK/code.txt")" "0" "step exits 0 on a PR with thousands of changed files"
+expect_context '^## Changed files' "the changed-file block renders"
+expect_context 'changed file list truncated' "an oversized changed-file list says it was cut"
+expect_context '^## Full diff' "the full diff heading survives a huge changed-file list"
+expect "$(escaped_of "$CTX_FILE" \
+  | awk -v lim="$PROMPT_ARG_LIMIT" '{print ($1 <= lim) ? "bounded" : "over"}')" \
+  "bounded" "thousands of changed files stay inside the argument limit"
+
 # --- Truncation --------------------------------------------------------------------------
 
 # An empty body under a heading is a claim: "## Full diff" with nothing beneath it reads as
@@ -656,8 +762,8 @@ expect "$(escaped_of "$CTX_FILE" \
   | awk -v lim="$PROMPT_ARG_LIMIT" '{print ($1 <= lim) ? "bounded" : "over"}')" \
   "bounded" "hundreds of conversation comments stay inside the argument limit"
 
-# The tail cut, which is now a backstop rather than the ordinary path. Every block above is
-# bounded except the PR body, which is author-controlled and has no cap -- a generated
+# The tail cut, which is now a backstop rather than the ordinary path. Every *fetched* block
+# is bounded; the PR body arrives through `env:` rather than an API read and has no cap -- a generated
 # release-note body is how a context still reaches the limit. Reaching it is a claim too:
 # the cut lands wherever the byte count runs out, so the notice has to be appended *after*
 # the cut or it is the first thing removed.

@@ -41,9 +41,11 @@ Both step outputs are interpolated into one `prompt:` string, so the binding lim
 "Argument list too long" while the action still reports success. The budget is denominated in
 *escaped* bytes, because the action carries the prompt a second time inside `toJson(inputs)` and the
 escaped copy is the larger one: a Grafana dashboard PR measured 123,401 raw bytes and 135,366
-escaped, and failed on two consecutive pushes. Beneath that total each block holds a share — comment
-threads at most half, CI log excerpts a quarter, the PR conversation an eighth, and the two diff
-blocks sharing 3,000 patch lines.
+escaped, and failed on two consecutive pushes. Beneath that total every block holds a byte share —
+comment threads and the since-last-review diff at most half each, CI log excerpts a quarter, the PR
+conversation and the changed-file list an eighth — with the two diff blocks also sharing 3,000 patch
+lines. A line cap is not a byte cap: at the 1.20x a quote-dense patch costs, 2,000 lines of dashboard
+JSON is about 120 KB escaped, so the since-diff needed both.
 
 The full diff is all-or-nothing. It renders whole or it is replaced by a notice naming its size and
 telling the reviewer to run `gh pr diff`. A prefix reads as the whole patch: what survives a cut is
@@ -55,8 +57,9 @@ can replace itself: `gh pr diff` is allowlisted and was refused 0 times in 54 at
 since-last-review diff keeps its prefix for the same reason inverted — `gh api .../compare` is not
 allowlisted, so trading its prefix for a notice would trade partial information for none.
 
-With every block bounded, the tail cut on the assembled context is a backstop rather than the
-ordinary path; the PR body is the one block with no cap of its own, and it is what still reaches it.
+With every fetched block bounded, the tail cut on the assembled context is a backstop rather than the
+ordinary path. The PR body is what still reaches it: it arrives through `env:` rather than an API
+read, and a generated release-note body is the remaining way for a context to exceed the budget.
 
 Everything reaching the prompt is attacker-controlled — title, body, diff, CI logs, comments — so the
 block delimiters are neutralised by shape rather than by exact string: `</pr_context >`,
