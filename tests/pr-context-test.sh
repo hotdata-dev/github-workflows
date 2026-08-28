@@ -21,8 +21,12 @@ cd "$(dirname "$0")/.."
 
 COMMITS_JQ=$(extract_jq COMMITS_JQ)
 FILES_JQ=$(extract_jq FILES_JQ)
-CHECKS_JQ=$(extract_jq CHECKS_JQ)
-FAILING_JOBS_JQ=$(extract_jq FAILING_JOBS_JQ)
+# Both check programs are shipped composed with the shared owner test, the way the workflow
+# ships CMD_JQ composed into TOOL_USAGE_JQ -- so they are exercised composed, and a change that
+# only holds in one of the two halves has nowhere to hide.
+CHECK_OWNER_JQ=$(extract_jq CHECK_OWNER_JQ)
+CHECKS_JQ="$CHECK_OWNER_JQ $(extract_jq CHECKS_JQ)"
+FAILING_JOBS_JQ="$CHECK_OWNER_JQ $(extract_jq FAILING_JOBS_JQ)"
 LAST_REVIEW_JQ=$(extract_jq LAST_REVIEW_JQ)
 COMPARE_STATUS_JQ=$(extract_jq COMPARE_STATUS_JQ)
 ISSUE_COMMENTS_JQ=$(extract_jq ISSUE_COMMENTS_JQ)
@@ -162,6 +166,17 @@ SUCCESS aikido/code-scan" \
 # of the context.
 expect "$(plain rollup-with-review-bot.json "$FAILING_JOBS_JQ")" "98914277093" \
   "the other reviewer's failing check contributes no job log"
+
+# The entry name is not the only place the other reviewer's identity shows up, and on an Actions
+# check run it is the *job* name -- so an exclusion testing only that depends on a job key in
+# another repository staying `pullfrog`, which nothing here pins. `{name: "review", workflowName:
+# "Pullfrog"}` is the ordinary shape of `name: Pullfrog` with a job called review, and the fixture
+# carries it alongside a `Pullfrog-Approval` status: both leaks come back whole under a
+# name-only, case-sensitive match.
+expect "$(plain rollup-with-review-bot.json "$CHECKS_JQ" | grep -ci pullfrog)" "0" \
+  "a workflow named for the other reviewer is excluded whatever its job is called"
+expect "$(plain rollup-with-review-bot.json "$FAILING_JOBS_JQ" | grep -c '98914300003')" "0" \
+  "that job's log is not fetched either"
 
 # Both rollup shapes, because which one an app posts is the app's choice. The slug comes from
 # $skip -- a GitHub App's login is its slug plus "[bot]" -- so there is no second constant to

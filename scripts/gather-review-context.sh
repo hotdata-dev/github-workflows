@@ -568,14 +568,30 @@ cap_file_escaped "$FILES_FILE" $((CTX_MAX_BYTES / 8)) \
 # Silent while other checks remain, and stated when the exclusion empties the block: a list
 # claims nothing about being every check, but "No checks reported." on a PR that has some is
 # a false claim, and this is the block whose emptiness the README warns gets read as green.
-CHECKS_JQ='def slug: $skip | sub("\\[bot\\]$"; ""); def theirs: ((if .__typename == "CheckRun" then (.name // "") else (.context // "") end) | . == slug or startswith(slug + "-")); def render: if .__typename == "CheckRun" then "\(.conclusion // .status // "UNKNOWN") \(.workflowName // "") / \(.name // "(unnamed check)")" else "\(.state // "UNKNOWN") \(.context // "status")" end; (.statusCheckRollup // []) as $all | ($all | map(select(theirs | not))) as $kept | (($all | length) - ($kept | length)) as $dropped | if ($kept | length) == 0 then (if $dropped > 0 then "No checks reported. (\($dropped) check(s) from \(slug) are excluded from this block; they carry a verdict from another reviewer, not a CI result.)" else "No checks reported." end) else ($kept | map(render) | sort | join("\n")) end'
+# One definition of "belongs to the other reviewer", composed into both programs below rather
+# than written into each: they are two programs, and a second copy of the rule is a copy free to
+# disagree with the first about what it matches -- which it already did, the failing-job scan
+# testing only .name while the list tested .context as well. Composed the way the workflow
+# composes CMD_JQ into TOOL_USAGE_JQ.
+#
+# It reads both names on the entry, not one. For a check the app posts itself, .name is the check
+# ("pullfrog", "pullfrog-approval") and there is no workflow behind it; for one that reached the
+# rollup from an Actions run, .name is the *job* name and .workflowName is the workflow's `name:`.
+# So a name-only test makes this exclusion depend on a job key in another repository staying
+# `pullfrog`: `name: Pullfrog` over a job called `review` arrives as
+# {name: "review", workflowName: "Pullfrog"} and slips through both programs whole. Dropping a
+# check belonging to a workflow named for the other reviewer is the intent in either shape.
+# Compared downcased for the same reason -- the slug is lowercase by construction, and a job name
+# is whatever someone typed.
+CHECK_OWNER_JQ='def slug: $skip | sub("\\[bot\\]$"; "") | ascii_downcase; def theirs: [(if .__typename == "CheckRun" then (.name // "") else (.context // "") end), (.workflowName // "")] | any(. != "" and (ascii_downcase | . == slug or startswith(slug + "-")));'
+CHECKS_JQ='def render: if .__typename == "CheckRun" then "\(.conclusion // .status // "UNKNOWN") \(.workflowName // "") / \(.name // "(unnamed check)")" else "\(.state // "UNKNOWN") \(.context // "status")" end; (.statusCheckRollup // []) as $all | ($all | map(select(theirs | not))) as $kept | (($all | length) - ($kept | length)) as $dropped | if ($kept | length) == 0 then (if $dropped > 0 then "No checks reported. (\($dropped) check(s) from \(slug) are excluded from this block; they carry a verdict from another reviewer, not a CI result.)" else "No checks reported." end) else ($kept | map(render) | sort | join("\n")) end'
 # Actions check runs carry the job id in detailsUrl; scan rather than capture so a
 # non-Actions check with no job id drops out instead of erroring.
-FAILING_JOBS_JQ='def slug: $skip | sub("\\[bot\\]$"; ""); [(.statusCheckRollup // [])[] | select(.__typename == "CheckRun") | select(((.name // "") | . == slug or startswith(slug + "-")) | not) | select((.conclusion // "") | test("FAILURE|TIMED_OUT|ACTION_REQUIRED")) | (.detailsUrl // "") | [scan("/job/([0-9]+)")] | flatten | .[0] // empty] | unique | .[0:3] | join(" ")'
+FAILING_JOBS_JQ='[(.statusCheckRollup // [])[] | select(.__typename == "CheckRun") | select(theirs | not) | select((.conclusion // "") | test("FAILURE|TIMED_OUT|ACTION_REQUIRED")) | (.detailsUrl // "") | [scan("/job/([0-9]+)")] | flatten | .[0] // empty] | unique | .[0:3] | join(" ")'
 if ROLLUP=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json statusCheckRollup); then
-  CHECKS=$(printf '%s' "$ROLLUP" | jq --arg skip "$OTHER_REVIEW_BOT" -r "$CHECKS_JQ" 2>/dev/null) \
+  CHECKS=$(printf '%s' "$ROLLUP" | jq --arg skip "$OTHER_REVIEW_BOT" -r "$CHECK_OWNER_JQ $CHECKS_JQ" 2>/dev/null) \
     || CHECKS="Could not parse checks."
-  JOB_IDS=$(printf '%s' "$ROLLUP" | jq --arg skip "$OTHER_REVIEW_BOT" -r "$FAILING_JOBS_JQ" 2>/dev/null) || JOB_IDS=''
+  JOB_IDS=$(printf '%s' "$ROLLUP" | jq --arg skip "$OTHER_REVIEW_BOT" -r "$CHECK_OWNER_JQ $FAILING_JOBS_JQ" 2>/dev/null) || JOB_IDS=''
 else
   echo "::warning::Could not read check status."
   CHECKS="Could not read check status."

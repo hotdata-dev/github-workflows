@@ -92,8 +92,12 @@ one, and after the trial that is the only shape a real drift takes, so it is the
 pin.
 
 The CI block is the third channel and the one with teeth, so `CHECKS_JQ` and `FAILING_JOBS_JQ`
-drop the same reviewer's checks by name — matched against the app slug, since a GitHub App's login
-is its slug plus `[bot]`, so `$skip` stays the single constant. Pullfrog's verdict is a check,
+drop the same reviewer's checks through one shared owner test, `CHECK_OWNER_JQ`, composed into both
+the way the workflow composes `CMD_JQ` into `TOOL_USAGE_JQ` — two copies of that rule were free to
+disagree about what "theirs" means, and did. It matches the app slug against both the entry's own
+name and its `workflowName`, downcased, since a GitHub App's login is its slug plus `[bot]` (so
+`$skip` stays the single constant) while an Actions check run carries the *job* name in `.name` —
+matching that alone would make the exclusion depend on a job key in another repository. Pullfrog's verdict is a check,
 `pullfrog-approval`, failing when it requested changes, and this prompt tells the reviewer that a
 failing check is a blocking issue to name and cite. Unfiltered, the rollup does not merely leak
 the other arm's conclusion; it converts it into a request-changes this reviewer cannot
@@ -113,7 +117,11 @@ relabelled rather than renumbered or dropped.
 
 Pullfrog cannot submit an approving review and `pullfrog-approval` is not required in the org
 ruleset, so this reviewer remains the only automated approval in the org for the duration of the
-trial. The constant, the four exclusions, and this section come out when the trial ends.
+trial. The constant, the four exclusions, the drift predicate's exception and this section come out
+when the trial ends — the drift predicate by name, because it is the one place an incomplete
+removal is silent. Delete `OTHER_REVIEW_BOT` and leave `$skip` in `DRIFT_JQ` and its `jq` call
+fails to compile, which the `elif` guarding it reads as "no drift": the backstop against a
+reviewer-login change would be gone with no warning in either direction.
 
 ### Tool usage artifact
 
