@@ -1,4 +1,34 @@
 # PULLFROG ACTION — DO NOT EDIT EXCEPT WHERE INDICATED
+#
+# Dispatched by Pullfrog's control plane, never by a pull_request event, and always against
+# `main` -- so this file governs a trial run only once it is on the default branch, and a
+# pull request changing it is not reviewed by its own copy. The same trap
+# claude-pr-review.yml carries, for the same reason.
+#
+# Every deviation from the console-generated file is below, and each one is deliberate:
+#
+#   env: removed entirely     The generated file maps ten provider secrets, ANTHROPIC_API_KEY
+#                             among them, which would hand the org secret that gates the
+#                             production reviewer to a third-party agent and let auto-select
+#                             quietly run this trial on Claude. The rest name secrets that do
+#                             not exist, and a workflow env: value *wins* over a
+#                             Pullfrog-stored key -- so an empty mapping would override the
+#                             console's OPENAI_API_KEY and fail every run with "Missing API
+#                             key". The key lives in the Pullfrog console instead, which also
+#                             keeps rotation and model changes off this file.
+#   push: disabled            The trial reviews and does nothing else. Read-only at the
+#                             action, so it holds even if a console toggle flips.
+#   shell: restricted         Already the default for a public repo; stated so it survives
+#                             the repo going private.
+#   progress_comments:        The reviewer next door reads the PR conversation into its
+#     disabled                prompt, where a live task list is context it pays for.
+#   timeout: 20m              A review is not an hour of work; the reviewer beside it is
+#                             capped at 15 minutes.
+#   checkout pinned           This repository pins every action to an exact patch version.
+#                             pullfrog/pullfrog stays on @v0 on the vendor's own advice: the
+#                             action is a bootstrap that floats the agent from npm, so a SHA
+#                             pin freezes only the post-run cleanup step and goes stale into
+#                             runs that fail after the agent has finished its work.
 name: Pullfrog
 run-name: ${{ inputs.name || github.workflow }}
 on:
@@ -18,60 +48,21 @@ jobs:
   pullfrog:
     runs-on: ubuntu-latest
     permissions:
+      # The only two the action needs: id-token to mint its own short-lived installation
+      # tokens over OIDC, contents to clone. It never uses this job's GITHUB_TOKEN, so
+      # nothing here grants it the ability to comment, review, or push.
       id-token: write
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 1
       - name: Run agent
         uses: pullfrog/pullfrog@v0
         with:
           prompt: ${{ inputs.prompt }}
-        env:
-          # add at least one provider API key
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GOOGLE_GENERATIVE_AI_API_KEY:
-            ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          
-          # for Amazon Bedrock (https://docs.pullfrog.com/bedrock)
-          # AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.AWS_BEARER_TOKEN_BEDROCK }}
-          # AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          # AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          # AWS_REGION: us-east-1
-          # BEDROCK_MODEL_ID: <bedrock-model-id>
-          
-          # for Google Vertex AI (https://docs.pullfrog.com/vertex)
-          # VERTEX_SERVICE_ACCOUNT_JSON: >-
-          #   ${{ secrets.VERTEX_SERVICE_ACCOUNT_JSON }}
-          # GOOGLE_CLOUD_PROJECT: my-project
-          # VERTEX_LOCATION: global
-          # VERTEX_MODEL_ID: <vertex-model-id>
-
-          # for Azure OpenAI (https://docs.pullfrog.com/azure)
-          # AZURE_RESOURCE_NAME is the <name> in https://<name>.openai.azure.com
-          # AZURE_DEPLOYMENT is your deployment's name, not the model it serves
-          # AZURE_RESOURCE_NAME: my-resource
-          # AZURE_API_KEY: ${{ secrets.AZURE_API_KEY }}
-          # AZURE_DEPLOYMENT: <deployment-name>
-          # both limits are required — set them to the real limits of that model
-          # AZURE_CONTEXT: "400000"
-          # AZURE_MAX_OUTPUT: "128000"
-
-          # for any OpenAI-compatible endpoint — LiteLLM, Cloudflare AI Gateway,
-          # self-hosted vLLM (https://docs.pullfrog.com/openai-compatible)
-          # OPENAI_COMPATIBLE_BASE_URL: https://litellm.example.com/v1
-          # OPENAI_COMPATIBLE_API_KEY: ${{ secrets.OPENAI_COMPATIBLE_API_KEY }}
-          # OPENAI_COMPATIBLE_MODEL: <model-id>
-          # both limits are required — set them to the real limits of that model
-          # OPENAI_COMPATIBLE_CONTEXT: "128000"
-          # OPENAI_COMPATIBLE_MAX_OUTPUT: "16384"
+          push: disabled
+          shell: restricted
+          progress_comments: disabled
+          timeout: 20m
