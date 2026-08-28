@@ -71,6 +71,58 @@ block delimiters are neutralised by shape rather than by exact string: `</pr_con
 `</PR_CONTEXT>` and `< / pr_context foo="1">` all read as the same delimiter to a model, and any of
 them would otherwise end the data block early and land the rest where it reads as instructions.
 
+### A second reviewer in parallel
+
+A comparison trial runs [Pullfrog](https://pullfrog.com) on OpenAI beside this reviewer, so its
+output is excluded from the two blocks that would otherwise carry it: `/pulls/{n}/comments`
+becomes `<prior_review_comments>` and `/issues/{n}/comments` becomes the PR conversation, and
+neither read filters by author. Both reviewers fire on `opened`, so the exclusion is what keeps
+the two arms of the comparison independent — whichever reviewer posts first would otherwise set
+what the other reads as settled prior feedback, not to be re-raised. It also protects the budget
+this reviewer already competes for: comment threads may take half of it, and a Pullfrog review
+body is a PR summary plus its findings.
+
+The login lives in one constant, `OTHER_REVIEW_BOT`, and reaches five programs as a jq `--arg`.
+One of them reads nothing out of the prompt at all: the review-cycle drift predicate asks whether
+a bot review exists that the `claude[bot]` filter did not count, which is true on the first review
+of every PR in a trial repo — so without the exclusion it would report a reviewer-identity change
+that has not happened, on every pull request, which is how the warning goes unread on the one
+where it is real. The predicate still has to fire when a drifted login sits *beside* the excluded
+one, and after the trial that is the only shape a real drift takes, so it is the case the fixtures
+pin.
+
+The CI block is the third channel and the one with teeth, so `CHECKS_JQ` and `FAILING_JOBS_JQ`
+drop the same reviewer's checks through one shared owner test, `CHECK_OWNER_JQ`, composed into both
+the way the workflow composes `CMD_JQ` into `TOOL_USAGE_JQ` — two copies of that rule were free to
+disagree about what "theirs" means, and did. It matches the app slug against both the entry's own
+name and its `workflowName`, downcased, since a GitHub App's login is its slug plus `[bot]` (so
+`$skip` stays the single constant) while an Actions check run carries the *job* name in `.name` —
+matching that alone would make the exclusion depend on a job key in another repository. Pullfrog's verdict is a check,
+`pullfrog-approval`, failing when it requested changes, and this prompt tells the reviewer that a
+failing check is a blocking issue to name and cite. Unfiltered, the rollup does not merely leak
+the other arm's conclusion; it converts it into a request-changes this reviewer cannot
+substantiate from the diff. Its run-status check is worse per byte: the check links to Pullfrog's
+own Actions job, and `FAILING_JOBS_JQ` would fetch that job's log into a `### Failing job` excerpt
+— the other reviewer's transcript, verbatim, at up to an eighth of the context. That the check
+gates no merge is true of merge and silent about the prompt.
+
+Where the exclusion empties a block it says so and how much it withheld, because
+"No prior review comments." on a PR that has some is the same false claim as an empty CI block
+reading as a green one. Where other entries remain it stays silent: neither block claims to be
+every comment or every check on the PR. One rendering changes with it. A human reply to an
+excluded comment is kept — real feedback, and dropping it would hide more than the exclusion
+protects — but its parent is gone, and an id pointing at nothing in the block turns "fixed in the
+next push" into a settled finding whose subject the reviewer never sees. So an orphaned reply is
+relabelled rather than renumbered or dropped.
+
+Pullfrog cannot submit an approving review and `pullfrog-approval` is not required in the org
+ruleset, so this reviewer remains the only automated approval in the org for the duration of the
+trial. The constant, the four exclusions, the drift predicate's exception and this section come out
+when the trial ends — the drift predicate by name, because it is the one place an incomplete
+removal is silent. Delete `OTHER_REVIEW_BOT` and leave `$skip` in `DRIFT_JQ` and its `jq` call
+fails to compile, which the `elif` guarding it reads as "no drift": the backstop against a
+reviewer-login change would be gone with no warning in either direction.
+
 ### Tool usage artifact
 
 Each run attaches a `claude-tool-usage-pr-<number>` artifact (14-day retention): tool call counts,

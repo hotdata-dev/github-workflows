@@ -1,0 +1,44 @@
+[
+  {
+    "id": 2101,
+    "user": { "login": "claude[bot]" },
+    "path": "scripts/gather-review-context.sh",
+    "line": 412,
+    "created_at": "2026-08-27T09:00:00Z",
+    "body": "The cap is measured on the unstripped file, so the emitted block can exceed it."
+  },
+  {
+    "id": 2102,
+    "user": { "login": "zfarrell" },
+    "path": "scripts/gather-review-context.sh",
+    "line": 412,
+    "in_reply_to_id": 2101,
+    "created_at": "2026-08-27T09:31:00Z",
+    "body": "Fixed in the next push -- strip_block_tags runs first now."
+  },
+  {
+    "id": 2103,
+    "user": { "login": "pullfrog[bot]" },
+    "path": "scripts/gather-review-context.sh",
+    "line": 88,
+    "created_at": "2026-08-27T09:04:00Z",
+    "body": "## Summary\n\nThis PR reworks the context budget. One finding: the byte cap and the line cap disagree."
+  },
+  {
+    "id": 2105,
+    "user": { "login": "zfarrell" },
+    "path": "scripts/gather-review-context.sh",
+    "line": 88,
+    "in_reply_to_id": 2103,
+    "created_at": "2026-08-27T09:40:00Z",
+    "body": "Good catch -- fixed in the next push."
+  },
+  {
+    "id": 2104,
+    "user": { "login": "claude[bot]" },
+    "path": "tests/lib.sh",
+    "line": 22,
+    "created_at": "2026-08-27T09:05:00Z",
+    "body": null
+  }
+]

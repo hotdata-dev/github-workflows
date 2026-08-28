@@ -19,6 +19,9 @@ cd "$(dirname "$0")/.."
 
 CYCLE_JQ=$(extract_jq CYCLE_JQ)
 DRIFT_JQ=$(extract_jq DRIFT_JQ)
+# The drift predicate takes the second reviewer's login as --arg, so the test has to supply
+# it -- extracted, never written here, so it cannot outlive a change to the shipped value.
+OTHER_REVIEW_BOT=$(extract_const OTHER_REVIEW_BOT)
 
 failures=0
 
@@ -39,7 +42,7 @@ expect() {
 # expect_drift <fixture> <fires|silent> <description>
 expect_drift() {
   local fixture=$1 want=$2 desc=$3 actual=silent
-  if jq -e -s "$DRIFT_JQ" "tests/fixtures/$fixture" >/dev/null 2>&1; then
+  if jq --arg skip "$OTHER_REVIEW_BOT" -e -s "$DRIFT_JQ" "tests/fixtures/$fixture" >/dev/null 2>&1; then
     actual=fires
   fi
   if [ "$actual" = "$want" ]; then
@@ -68,6 +71,25 @@ expect reviews-mixed-bots.json 3 "only claude[bot] rounds count, one per commit"
 expect reviews-foreign-reviewer.json 1 "unknown reviewer login yields no rounds"
 expect_drift reviews-foreign-reviewer.json fires "drift warning fires when the login moved"
 expect_drift reviews-first-review.json silent "drift warning silent on a genuine cycle 1"
+
+# The second reviewer in the comparison trial is a Bot and reviews the same pull requests,
+# and both reviewers fire on `opened` -- so its review landing before this one's is the
+# ordinary cycle 1, not evidence that this reviewer's identity moved. Without the exclusion
+# in the predicate the warning would fire on the first review of every PR in a trial repo,
+# which is how a real drift goes unread.
+expect reviews-other-review-bot.json 1 "the other reviewer's rounds do not count as ours"
+expect_drift reviews-other-review-bot.json silent \
+  "drift warning silent when only the other review bot has reviewed"
+
+# And the state the exclusion makes ordinary is the one the predicate still has to catch: a
+# drifted login sitting *beside* the excluded one. Every PR in a trial repo carries a
+# pullfrog[bot] review, so this -- not the foreign bot alone -- is what a real identity change
+# looks like from now on. A predicate that excluded $skip in a way that also swallowed its
+# neighbours (`all` in place of `any`, or a filter applied to the whole array before the type
+# test) passes both cases above and goes silent here, which is the only case left that matters.
+expect reviews-drift-with-other-bot.json 1 "a drifted login beside the excluded one yields no rounds"
+expect_drift reviews-drift-with-other-bot.json fires \
+  "drift warning still fires when a drifted login sits beside the excluded one"
 
 # gh 2.93 merges --paginate pages into one array; older versions concatenate one array per
 # page. `jq -s '.[][]'` must handle both, so keep a concatenated fixture.

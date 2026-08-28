@@ -39,3 +39,12 @@ extract_jq() {
   fi
   printf '%s' "$prog"
 }
+
+# extract_const <shell variable name> -- the same extraction for a value that is not a jq
+# program, so a test can pass the shipped constant to a program that takes it as --arg
+# instead of writing a second copy of it here. OTHER_REVIEW_BOT is the case: three shipped
+# programs read it, and a test hardcoding the login would keep passing after the constant
+# changed -- which is precisely the drift the extraction of the programs exists to prevent.
+extract_const() {
+  extract_jq "$1"
+}

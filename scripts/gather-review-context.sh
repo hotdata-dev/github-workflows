@@ -298,9 +298,31 @@ fetch_raw() {
 # Coupled to the reviewer's login: if that ever changes the count silently drops
 # to 0 and every round looks like the first, hence the warning below.
 CYCLE_JQ='[.[][] | select(.user.login == "claude[bot]") | .commit_id] | unique | length'
+# The login of the second automated reviewer running beside this one, and the one value
+# three programs below have to agree on. A comparison trial has Pullfrog reviewing the same
+# pull requests, and both reviewers fire on `opened`, so its output reaches this reviewer
+# through two reads that filter by nothing: `/pulls/{n}/comments` becomes
+# <prior_review_comments> and `/issues/{n}/comments` becomes the PR conversation. Left in,
+# it costs the trial its independence -- whichever reviewer posts first sets what the other
+# reads as settled prior feedback -- and it costs the diff blocks the bytes, since comment
+# threads may take half the escaped-byte budget and a cut context measured 0.92 findings a
+# run against 1.91 uncut. So the exclusion is not tidiness; it is what keeps the two arms
+# of the comparison, and the reviewer's own budget, intact.
+#
+# Handed to jq with --arg at each site rather than written into each program, because a
+# second copy of a constant is a copy free to drift from the first. tests/lib.sh reads this
+# assignment for the same reason it extracts the jq programs.
+#
+# It comes out when the trial ends. Nothing else in the org posts reviews.
+OTHER_REVIEW_BOT='pullfrog[bot]'
 # Only consulted when CYCLE is 0; see the warning below. Kept in its own variable
 # so tests/review-cycle-test.sh can assert it against the fixtures.
-DRIFT_JQ='any(.[][]; .user.type == "Bot")'
+#
+# $skip is excluded from the predicate, not merely from the count: the trial makes a bot
+# review on a genuine cycle 1 the ordinary case, so without it every first review in a
+# trial repo would report a reviewer-identity drift that has not happened -- and an alarm
+# that fires on every PR is an alarm nobody reads on the PR where it is real.
+DRIFT_JQ='any(.[][]; .user.type == "Bot" and .user.login != $skip)'
 # Never fail the review over the cycle number; degrade to 1, but say so. gh
 # writes its error body to stdout, so an unguarded pipe into jq aborts the step
 # under `bash -e` and skips the failure-notification step below.
@@ -326,9 +348,10 @@ if [ -z "$CYCLE" ]; then
   echo "::warning::Could not parse prior reviews; treating this as review cycle 1."
   CYCLE=0
 elif [ "$CYCLE" -eq 0 ] && printf '%s' "$REVIEWS" \
-  | jq -e -s "$DRIFT_JQ" >/dev/null 2>&1; then
-  # claude[bot] is the only bot that submits reviews across the org (598 of 598
-  # sampled), so bot reviews that the login filter did not count mean the
+  | jq --arg skip "$OTHER_REVIEW_BOT" -e -s "$DRIFT_JQ" >/dev/null 2>&1; then
+  # claude[bot] was the only bot submitting reviews across the org when this was
+  # written (598 of 598 sampled), and $OTHER_REVIEW_BOT is the stated exception,
+  # so any *other* bot review that the login filter did not count means the
   # reviewer's identity moved and the counter has silently pinned at 1.
   echo "::warning::Bot reviews exist but none matched the reviewer login; the review cycle counter is stale."
 fi
@@ -352,22 +375,22 @@ fi
 # "No prior review comments." is only true when the fetch worked and returned
 # none. Saying it after a failed fetch is the same false claim as an empty CI block
 # reading as a green one, and it is the claim the cycle ladder acts on.
+#
+# $skip's comments are dropped here -- see OTHER_REVIEW_BOT above for why. The drop is
+# announced only when it empties the block, and that asymmetry is the point: with other
+# comments still present the block claims nothing about being every comment on the PR, but
+# "No prior review comments." on a PR that has some is the same false claim as an empty CI
+# block reading as a green one. So the empty case names what was withheld and how much.
+#
+# Single-line and single-quoted so tests/lib.sh can extract it; it was inline, and inline
+# meant the one program in this script that shapes the prompt's other output could not be
+# asserted against a fixture at all.
+THREADS_JQ='(add // []) as $all | ($all | map(select(.user.login != $skip))) as $kept | ($kept | map(.id)) as $ids | (($all | length) - ($kept | length)) as $dropped | if ($kept | length) == 0 then (if $dropped > 0 then "No prior review comments. (\($dropped) comment(s) from \($skip) are excluded from this block.)" else "No prior review comments." end) else ($kept | sort_by(.created_at) | .[] | "---", "Author: \(.user.login)", "File: \(.path)", (if .line then "Line: \(.line)" else empty end), (if .in_reply_to_id then (if (.in_reply_to_id | IN($ids[])) then "Reply to #\(.in_reply_to_id)" else "Reply to a comment excluded from this block" end) else "Thread #\(.id)" end), "", ((.body // "")[0:3000])) end'
 if [ "$COMMENTS_OK" -eq 0 ]; then
   THREADS='Unavailable: the prior inline review comments could not be read. This block is empty because the fetch failed, not because there were none.'
 else
-THREADS=$(printf '%s' "$COMMENTS" | jq -s -r '
-  (add // []) | sort_by(.created_at) |
-  if length == 0 then "No prior review comments."
-  else .[] |
-    "---",
-    "Author: \(.user.login)",
-    "File: \(.path)",
-    (if .line then "Line: \(.line)" else empty end),
-    (if .in_reply_to_id then "Reply to #\(.in_reply_to_id)" else "Thread #\(.id)" end),
-    "",
-    ((.body // "")[0:3000])
-  end
-') || THREADS='Unavailable: the prior inline review comments could not be parsed.'
+  THREADS=$(printf '%s' "$COMMENTS" | jq --arg skip "$OTHER_REVIEW_BOT" -s -r "$THREADS_JQ") \
+    || THREADS='Unavailable: the prior inline review comments could not be parsed.'
 fi
 
 # The prompt wraps both blocks below in <prior_review_comments> and <pr_context>
@@ -526,14 +549,49 @@ cap_file_escaped "$FILES_FILE" $((CTX_MAX_BYTES / 8)) \
 # The reviewer cannot run tests -- no dependencies are installed and the allowlist
 # would refuse anyway -- but CI already ran them. Whether they passed is the one
 # fact it was asserting without evidence.
-CHECKS_JQ='(.statusCheckRollup // []) | if length == 0 then "No checks reported." else map(if .__typename == "CheckRun" then "\(.conclusion // .status // "UNKNOWN") \(.workflowName // "") / \(.name // "(unnamed check)")" else "\(.state // "UNKNOWN") \(.context // "status")" end) | sort | join("\n") end'
+#
+# This block is the third channel $skip reaches, and the one where it does the most damage.
+# Pullfrog posts its verdict as a check -- `pullfrog-approval`, failing when it requested
+# changes -- and the prompt tells this reviewer that a failing check is a blocking issue to
+# name and cite. So an unfiltered rollup does not merely leak the other arm's conclusion; it
+# converts it into a request-changes this reviewer cannot substantiate from the diff.
+# `pullfrog` (the run-status check) rides along for the same reason, and its detailsUrl would
+# otherwise feed FAILING_JOBS_JQ below the *other reviewer's own job log* as a failing-job
+# excerpt, at up to an eighth of the context.
+#
+# Matched by name against the app slug rather than by a second constant: a GitHub App's bot
+# login is its slug plus "[bot]", and its checks are the slug and slug-prefixed names, so
+# $skip still carries the one value all five programs agree on. Both rollup shapes are
+# matched -- a CheckRun by .name, a StatusContext by .context -- because which of the two an
+# app posts is the app's choice, not ours.
+#
+# Silent while other checks remain, and stated when the exclusion empties the block: a list
+# claims nothing about being every check, but "No checks reported." on a PR that has some is
+# a false claim, and this is the block whose emptiness the README warns gets read as green.
+# One definition of "belongs to the other reviewer", composed into both programs below rather
+# than written into each: they are two programs, and a second copy of the rule is a copy free to
+# disagree with the first about what it matches -- which it already did, the failing-job scan
+# testing only .name while the list tested .context as well. Composed the way the workflow
+# composes CMD_JQ into TOOL_USAGE_JQ.
+#
+# It reads both names on the entry, not one. For a check the app posts itself, .name is the check
+# ("pullfrog", "pullfrog-approval") and there is no workflow behind it; for one that reached the
+# rollup from an Actions run, .name is the *job* name and .workflowName is the workflow's `name:`.
+# So a name-only test makes this exclusion depend on a job key in another repository staying
+# `pullfrog`: `name: Pullfrog` over a job called `review` arrives as
+# {name: "review", workflowName: "Pullfrog"} and slips through both programs whole. Dropping a
+# check belonging to a workflow named for the other reviewer is the intent in either shape.
+# Compared downcased for the same reason -- the slug is lowercase by construction, and a job name
+# is whatever someone typed.
+CHECK_OWNER_JQ='def slug: $skip | sub("\\[bot\\]$"; "") | ascii_downcase; def theirs: [(if .__typename == "CheckRun" then (.name // "") else (.context // "") end), (.workflowName // "")] | any(. != "" and (ascii_downcase | . == slug or startswith(slug + "-")));'
+CHECKS_JQ='def render: if .__typename == "CheckRun" then "\(.conclusion // .status // "UNKNOWN") \(.workflowName // "") / \(.name // "(unnamed check)")" else "\(.state // "UNKNOWN") \(.context // "status")" end; (.statusCheckRollup // []) as $all | ($all | map(select(theirs | not))) as $kept | (($all | length) - ($kept | length)) as $dropped | if ($kept | length) == 0 then (if $dropped > 0 then "No checks reported. (\($dropped) check(s) from \(slug) are excluded from this block; they carry a verdict from another reviewer, not a CI result.)" else "No checks reported." end) else ($kept | map(render) | sort | join("\n")) end'
 # Actions check runs carry the job id in detailsUrl; scan rather than capture so a
 # non-Actions check with no job id drops out instead of erroring.
-FAILING_JOBS_JQ='[(.statusCheckRollup // [])[] | select(.__typename == "CheckRun") | select((.conclusion // "") | test("FAILURE|TIMED_OUT|ACTION_REQUIRED")) | (.detailsUrl // "") | [scan("/job/([0-9]+)")] | flatten | .[0] // empty] | unique | .[0:3] | join(" ")'
+FAILING_JOBS_JQ='[(.statusCheckRollup // [])[] | select(.__typename == "CheckRun") | select(theirs | not) | select((.conclusion // "") | test("FAILURE|TIMED_OUT|ACTION_REQUIRED")) | (.detailsUrl // "") | [scan("/job/([0-9]+)")] | flatten | .[0] // empty] | unique | .[0:3] | join(" ")'
 if ROLLUP=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json statusCheckRollup); then
-  CHECKS=$(printf '%s' "$ROLLUP" | jq -r "$CHECKS_JQ" 2>/dev/null) \
+  CHECKS=$(printf '%s' "$ROLLUP" | jq --arg skip "$OTHER_REVIEW_BOT" -r "$CHECK_OWNER_JQ $CHECKS_JQ" 2>/dev/null) \
     || CHECKS="Could not parse checks."
-  JOB_IDS=$(printf '%s' "$ROLLUP" | jq -r "$FAILING_JOBS_JQ" 2>/dev/null) || JOB_IDS=''
+  JOB_IDS=$(printf '%s' "$ROLLUP" | jq --arg skip "$OTHER_REVIEW_BOT" -r "$CHECK_OWNER_JQ $FAILING_JOBS_JQ" 2>/dev/null) || JOB_IDS=''
 else
   echo "::warning::Could not read check status."
   CHECKS="Could not read check status."
@@ -706,9 +764,13 @@ if [ "$FULL_DIFF_MAX" -gt "$DIFF_MAX" ]; then FULL_DIFF_MAX=$DIFF_MAX; fi
 # prompt on www.hotdata.dev#332. Stripped before the cap for the reason strip_block_tags
 # always runs first -- the substitution grows the text, so a cap on the unstripped file
 # bounds a smaller string than the one emitted.
-ISSUE_COMMENTS_JQ='[.[][]] | if length == 0 then "No PR conversation comments." else sort_by(.created_at) | map("--- \(.user.login) at \(.created_at)\n\((.body // "")[0:3000])") | join("\n") end'
+#
+# $skip is excluded here as well, and for the same reason: the review body Pullfrog posts
+# is a PR summary plus its findings, and this endpoint is where it lands. The empty case
+# names the withholding on the same principle as the threads block above.
+ISSUE_COMMENTS_JQ='[.[][]] as $all | ($all | map(select(.user.login != $skip))) as $kept | (($all | length) - ($kept | length)) as $dropped | if ($kept | length) == 0 then (if $dropped > 0 then "No PR conversation comments. (\($dropped) comment(s) from \($skip) are excluded from this block.)" else "No PR conversation comments." end) else ($kept | sort_by(.created_at) | map("--- \(.user.login) at \(.created_at)\n\((.body // "")[0:3000])") | join("\n")) end'
 if CONVO_JSON=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate); then
-  CONVO=$(printf '%s' "$CONVO_JSON" | jq -s -r "$ISSUE_COMMENTS_JQ" 2>/dev/null) \
+  CONVO=$(printf '%s' "$CONVO_JSON" | jq --arg skip "$OTHER_REVIEW_BOT" -s -r "$ISSUE_COMMENTS_JQ" 2>/dev/null) \
     || CONVO="Could not parse PR conversation comments."
 else
   echo "::warning::Could not read PR conversation comments."
