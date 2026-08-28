@@ -71,6 +71,33 @@ block delimiters are neutralised by shape rather than by exact string: `</pr_con
 `</PR_CONTEXT>` and `< / pr_context foo="1">` all read as the same delimiter to a model, and any of
 them would otherwise end the data block early and land the rest where it reads as instructions.
 
+### A second reviewer in parallel
+
+A comparison trial runs [Pullfrog](https://pullfrog.com) on OpenAI beside this reviewer, so its
+output is excluded from the two blocks that would otherwise carry it: `/pulls/{n}/comments`
+becomes `<prior_review_comments>` and `/issues/{n}/comments` becomes the PR conversation, and
+neither read filters by author. Both reviewers fire on `opened`, so the exclusion is what keeps
+the two arms of the comparison independent — whichever reviewer posts first would otherwise set
+what the other reads as settled prior feedback, not to be re-raised. It also protects the budget
+this reviewer already competes for: comment threads may take half of it, and a Pullfrog review
+body is a PR summary plus its findings.
+
+The login lives in one constant, `OTHER_REVIEW_BOT`, and reaches three programs as a jq `--arg`.
+The third is the review-cycle drift predicate, which asks whether a bot review exists that the
+`claude[bot]` filter did not count — true on the first review of every PR in a trial repo, so
+without the exclusion it would report a reviewer-identity change that has not happened, on every
+pull request, which is how the warning goes unread on the one where it is real.
+
+Where the exclusion empties a block it says so and how much it withheld, because
+"No prior review comments." on a PR that has some is the same false claim as an empty CI block
+reading as a green one. Where other comments remain it stays silent: the block claims nothing
+about being every comment on the PR.
+
+Pullfrog's own review verdict is a check, `pullfrog-approval`, reporting whether it *would*
+approve. It is not required in the org ruleset and Pullfrog cannot submit an approving review, so
+this reviewer remains the only automated approval in the org for the duration of the trial. The
+constant, and this section, come out when the trial ends.
+
 ### Tool usage artifact
 
 Each run attaches a `claude-tool-usage-pr-<number>` artifact (14-day retention): tool call counts,

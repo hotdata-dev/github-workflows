@@ -298,9 +298,31 @@ fetch_raw() {
 # Coupled to the reviewer's login: if that ever changes the count silently drops
 # to 0 and every round looks like the first, hence the warning below.
 CYCLE_JQ='[.[][] | select(.user.login == "claude[bot]") | .commit_id] | unique | length'
+# The login of the second automated reviewer running beside this one, and the one value
+# three programs below have to agree on. A comparison trial has Pullfrog reviewing the same
+# pull requests, and both reviewers fire on `opened`, so its output reaches this reviewer
+# through two reads that filter by nothing: `/pulls/{n}/comments` becomes
+# <prior_review_comments> and `/issues/{n}/comments` becomes the PR conversation. Left in,
+# it costs the trial its independence -- whichever reviewer posts first sets what the other
+# reads as settled prior feedback -- and it costs the diff blocks the bytes, since comment
+# threads may take half the escaped-byte budget and a cut context measured 0.92 findings a
+# run against 1.91 uncut. So the exclusion is not tidiness; it is what keeps the two arms
+# of the comparison, and the reviewer's own budget, intact.
+#
+# Handed to jq with --arg at each site rather than written into each program, because a
+# second copy of a constant is a copy free to drift from the first. tests/lib.sh reads this
+# assignment for the same reason it extracts the jq programs.
+#
+# It comes out when the trial ends. Nothing else in the org posts reviews.
+OTHER_REVIEW_BOT='pullfrog[bot]'
 # Only consulted when CYCLE is 0; see the warning below. Kept in its own variable
 # so tests/review-cycle-test.sh can assert it against the fixtures.
-DRIFT_JQ='any(.[][]; .user.type == "Bot")'
+#
+# $skip is excluded from the predicate, not merely from the count: the trial makes a bot
+# review on a genuine cycle 1 the ordinary case, so without it every first review in a
+# trial repo would report a reviewer-identity drift that has not happened -- and an alarm
+# that fires on every PR is an alarm nobody reads on the PR where it is real.
+DRIFT_JQ='any(.[][]; .user.type == "Bot" and .user.login != $skip)'
 # Never fail the review over the cycle number; degrade to 1, but say so. gh
 # writes its error body to stdout, so an unguarded pipe into jq aborts the step
 # under `bash -e` and skips the failure-notification step below.
@@ -326,9 +348,10 @@ if [ -z "$CYCLE" ]; then
   echo "::warning::Could not parse prior reviews; treating this as review cycle 1."
   CYCLE=0
 elif [ "$CYCLE" -eq 0 ] && printf '%s' "$REVIEWS" \
-  | jq -e -s "$DRIFT_JQ" >/dev/null 2>&1; then
-  # claude[bot] is the only bot that submits reviews across the org (598 of 598
-  # sampled), so bot reviews that the login filter did not count mean the
+  | jq --arg skip "$OTHER_REVIEW_BOT" -e -s "$DRIFT_JQ" >/dev/null 2>&1; then
+  # claude[bot] was the only bot submitting reviews across the org when this was
+  # written (598 of 598 sampled), and $OTHER_REVIEW_BOT is the stated exception,
+  # so any *other* bot review that the login filter did not count means the
   # reviewer's identity moved and the counter has silently pinned at 1.
   echo "::warning::Bot reviews exist but none matched the reviewer login; the review cycle counter is stale."
 fi
@@ -352,22 +375,22 @@ fi
 # "No prior review comments." is only true when the fetch worked and returned
 # none. Saying it after a failed fetch is the same false claim as an empty CI block
 # reading as a green one, and it is the claim the cycle ladder acts on.
+#
+# $skip's comments are dropped here -- see OTHER_REVIEW_BOT above for why. The drop is
+# announced only when it empties the block, and that asymmetry is the point: with other
+# comments still present the block claims nothing about being every comment on the PR, but
+# "No prior review comments." on a PR that has some is the same false claim as an empty CI
+# block reading as a green one. So the empty case names what was withheld and how much.
+#
+# Single-line and single-quoted so tests/lib.sh can extract it; it was inline, and inline
+# meant the one program in this script that shapes the prompt's other output could not be
+# asserted against a fixture at all.
+THREADS_JQ='(add // []) as $all | ($all | map(select(.user.login != $skip))) as $kept | (($all | length) - ($kept | length)) as $dropped | if ($kept | length) == 0 then (if $dropped > 0 then "No prior review comments. (\($dropped) comment(s) from \($skip) are excluded from this block.)" else "No prior review comments." end) else ($kept | sort_by(.created_at) | .[] | "---", "Author: \(.user.login)", "File: \(.path)", (if .line then "Line: \(.line)" else empty end), (if .in_reply_to_id then "Reply to #\(.in_reply_to_id)" else "Thread #\(.id)" end), "", ((.body // "")[0:3000])) end'
 if [ "$COMMENTS_OK" -eq 0 ]; then
   THREADS='Unavailable: the prior inline review comments could not be read. This block is empty because the fetch failed, not because there were none.'
 else
-THREADS=$(printf '%s' "$COMMENTS" | jq -s -r '
-  (add // []) | sort_by(.created_at) |
-  if length == 0 then "No prior review comments."
-  else .[] |
-    "---",
-    "Author: \(.user.login)",
-    "File: \(.path)",
-    (if .line then "Line: \(.line)" else empty end),
-    (if .in_reply_to_id then "Reply to #\(.in_reply_to_id)" else "Thread #\(.id)" end),
-    "",
-    ((.body // "")[0:3000])
-  end
-') || THREADS='Unavailable: the prior inline review comments could not be parsed.'
+  THREADS=$(printf '%s' "$COMMENTS" | jq --arg skip "$OTHER_REVIEW_BOT" -s -r "$THREADS_JQ") \
+    || THREADS='Unavailable: the prior inline review comments could not be parsed.'
 fi
 
 # The prompt wraps both blocks below in <prior_review_comments> and <pr_context>
@@ -706,9 +729,13 @@ if [ "$FULL_DIFF_MAX" -gt "$DIFF_MAX" ]; then FULL_DIFF_MAX=$DIFF_MAX; fi
 # prompt on www.hotdata.dev#332. Stripped before the cap for the reason strip_block_tags
 # always runs first -- the substitution grows the text, so a cap on the unstripped file
 # bounds a smaller string than the one emitted.
-ISSUE_COMMENTS_JQ='[.[][]] | if length == 0 then "No PR conversation comments." else sort_by(.created_at) | map("--- \(.user.login) at \(.created_at)\n\((.body // "")[0:3000])") | join("\n") end'
+#
+# $skip is excluded here as well, and for the same reason: the review body Pullfrog posts
+# is a PR summary plus its findings, and this endpoint is where it lands. The empty case
+# names the withholding on the same principle as the threads block above.
+ISSUE_COMMENTS_JQ='[.[][]] as $all | ($all | map(select(.user.login != $skip))) as $kept | (($all | length) - ($kept | length)) as $dropped | if ($kept | length) == 0 then (if $dropped > 0 then "No PR conversation comments. (\($dropped) comment(s) from \($skip) are excluded from this block.)" else "No PR conversation comments." end) else ($kept | sort_by(.created_at) | map("--- \(.user.login) at \(.created_at)\n\((.body // "")[0:3000])") | join("\n")) end'
 if CONVO_JSON=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate); then
-  CONVO=$(printf '%s' "$CONVO_JSON" | jq -s -r "$ISSUE_COMMENTS_JQ" 2>/dev/null) \
+  CONVO=$(printf '%s' "$CONVO_JSON" | jq --arg skip "$OTHER_REVIEW_BOT" -s -r "$ISSUE_COMMENTS_JQ" 2>/dev/null) \
     || CONVO="Could not parse PR conversation comments."
 else
   echo "::warning::Could not read PR conversation comments."

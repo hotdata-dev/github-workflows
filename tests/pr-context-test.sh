@@ -26,6 +26,11 @@ FAILING_JOBS_JQ=$(extract_jq FAILING_JOBS_JQ)
 LAST_REVIEW_JQ=$(extract_jq LAST_REVIEW_JQ)
 COMPARE_STATUS_JQ=$(extract_jq COMPARE_STATUS_JQ)
 ISSUE_COMMENTS_JQ=$(extract_jq ISSUE_COMMENTS_JQ)
+THREADS_JQ=$(extract_jq THREADS_JQ)
+# Both comment programs take the second reviewer's login as --arg. Extracted, not written
+# here: a test carrying its own copy of the login would keep passing after the shipped
+# constant changed, which is the drift extracting the programs exists to prevent.
+OTHER_REVIEW_BOT=$(extract_const OTHER_REVIEW_BOT)
 
 failures=0
 
@@ -43,11 +48,15 @@ expect() {
 
 # The paginated endpoints go through `jq -s` in the workflow, because gh 2.93 merges
 # --paginate pages into one array while older versions concatenate one array per page.
+#
+# --arg skip on every call, whether the program reads it or not: jq only objects to an
+# undefined $skip, never to an unused one, and one helper is easier to keep right than a
+# second helper for the two programs that take it.
 slurped() {
-  jq -s -r "$2" "tests/fixtures/$1"
+  jq --arg skip "$OTHER_REVIEW_BOT" -s -r "$2" "tests/fixtures/$1"
 }
 plain() {
-  jq -r "$2" "tests/fixtures/$1"
+  jq --arg skip "$OTHER_REVIEW_BOT" -r "$2" "tests/fixtures/$1"
 }
 
 # --- Commits -----------------------------------------------------------------------------
@@ -178,6 +187,38 @@ expect "$(printf '{"status":"diverged"}' | jq -r "$COMPARE_STATUS_JQ")" "diverge
 expect "$(printf '{}' | jq -r "$COMPARE_STATUS_JQ")" "unknown" \
   "comparison with no status reports unknown, never ahead"
 
+# --- Prior review threads ----------------------------------------------------------------
+
+# This block is the prompt's other output, interpolated into the same string as pr_context
+# and wrapped in <prior_review_comments>. It was an inline jq program until the exclusion
+# below needed asserting, so these are its first fixture-level assertions.
+
+# Every kept comment is labelled, and the reply carries its parent rather than a thread id:
+# the reviewer decides whether prior feedback was answered by reading who said what to whom.
+expect "$(slurped pull-comments-mixed-authors.json "$THREADS_JQ" | grep -c '^Author: ')" "3" \
+  "every kept thread comment is labelled with its author"
+expect "$(slurped pull-comments-mixed-authors.json "$THREADS_JQ" | grep -c '^Reply to #2101$')" "1" \
+  "a reply carries its parent comment id, not a thread id"
+
+# The exclusion the trial turns on. A second reviewer's findings arriving here would reach
+# this reviewer as settled prior feedback -- not to be re-raised -- which is how a parallel
+# comparison stops comparing two independent reviews.
+expect "$(slurped pull-comments-mixed-authors.json "$THREADS_JQ" | grep -c 'pullfrog')" "0" \
+  "the other review bot's inline comments do not reach the prompt"
+expect "$(slurped pull-comments-mixed-authors.json "$THREADS_JQ" | grep -c '^null$')" "0" \
+  "null comment body does not render as the word null"
+
+# Withholding the only comments on the PR leaves a sentence that would otherwise be false,
+# and this block's sentences are what the cycle ladder acts on. So the empty case says how
+# many comments were withheld and whose, while the genuinely empty case stays plain.
+expect "$(printf '[{"id":1,"user":{"login":"%s"},"path":"a.py","line":3,"created_at":"2026-08-28T00:00:00Z","body":"finding"}]' \
+  "$OTHER_REVIEW_BOT" | jq --arg skip "$OTHER_REVIEW_BOT" -s -r "$THREADS_JQ")" \
+  "No prior review comments. (1 comment(s) from $OTHER_REVIEW_BOT are excluded from this block.)" \
+  "a block emptied by the exclusion says so, and how much it withheld"
+expect "$(printf '[]' | jq --arg skip "$OTHER_REVIEW_BOT" -s -r "$THREADS_JQ")" \
+  "No prior review comments." \
+  "a genuinely empty block claims nothing about an exclusion"
+
 # --- PR conversation ---------------------------------------------------------------------
 
 # Chronological, and every author labelled: the reviewer's own prior summary comments are in
@@ -194,8 +235,23 @@ expect "$(slurped issue-comments.json "$ISSUE_COMMENTS_JQ" | head -1)" \
 expect "$(slurped issue-comments.json "$ISSUE_COMMENTS_JQ" | grep -c '^null$')" "0" \
   "null comment body does not render as the word null"
 
-expect "$(printf '[]' | jq -s -r "$ISSUE_COMMENTS_JQ")" "No PR conversation comments." \
+expect "$(printf '[]' | jq --arg skip "$OTHER_REVIEW_BOT" -s -r "$ISSUE_COMMENTS_JQ")" \
+  "No PR conversation comments." \
   "no conversation comments says so"
+
+# The other half of the exclusion. The second reviewer posts its review body here -- a PR
+# summary plus its findings -- so this endpoint carries the bulk of what it would contribute
+# to this reviewer's prompt, against a block that may take half the escaped-byte budget.
+expect "$(printf '[{"id":1,"user":{"login":"zfarrell"},"created_at":"2026-08-28T00:00:00Z","body":"rebased"},{"id":2,"user":{"login":"%s"},"created_at":"2026-08-28T00:01:00Z","body":"## Summary"}]' \
+  "$OTHER_REVIEW_BOT" | jq --arg skip "$OTHER_REVIEW_BOT" -s -r "$ISSUE_COMMENTS_JQ")" \
+  "--- zfarrell at 2026-08-28T00:00:00Z
+rebased" \
+  "the other review bot's conversation comments do not reach the prompt"
+
+expect "$(printf '[{"id":2,"user":{"login":"%s"},"created_at":"2026-08-28T00:01:00Z","body":"## Summary"}]' \
+  "$OTHER_REVIEW_BOT" | jq --arg skip "$OTHER_REVIEW_BOT" -s -r "$ISSUE_COMMENTS_JQ")" \
+  "No PR conversation comments. (1 comment(s) from $OTHER_REVIEW_BOT are excluded from this block.)" \
+  "a conversation emptied by the exclusion says so too"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures test(s) failed"
