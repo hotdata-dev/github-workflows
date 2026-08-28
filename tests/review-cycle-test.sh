@@ -81,6 +81,16 @@ expect reviews-other-review-bot.json 1 "the other reviewer's rounds do not count
 expect_drift reviews-other-review-bot.json silent \
   "drift warning silent when only the other review bot has reviewed"
 
+# And the state the exclusion makes ordinary is the one the predicate still has to catch: a
+# drifted login sitting *beside* the excluded one. Every PR in a trial repo carries a
+# pullfrog[bot] review, so this -- not the foreign bot alone -- is what a real identity change
+# looks like from now on. A predicate that excluded $skip in a way that also swallowed its
+# neighbours (`all` in place of `any`, or a filter applied to the whole array before the type
+# test) passes both cases above and goes silent here, which is the only case left that matters.
+expect reviews-drift-with-other-bot.json 1 "a drifted login beside the excluded one yields no rounds"
+expect_drift reviews-drift-with-other-bot.json fires \
+  "drift warning still fires when a drifted login sits beside the excluded one"
+
 # gh 2.93 merges --paginate pages into one array; older versions concatenate one array per
 # page. `jq -s '.[][]'` must handle both, so keep a concatenated fixture.
 expect reviews-paginated.json 3 "concatenated --paginate pages count once each"

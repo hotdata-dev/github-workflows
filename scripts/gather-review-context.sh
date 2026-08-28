@@ -385,7 +385,7 @@ fi
 # Single-line and single-quoted so tests/lib.sh can extract it; it was inline, and inline
 # meant the one program in this script that shapes the prompt's other output could not be
 # asserted against a fixture at all.
-THREADS_JQ='(add // []) as $all | ($all | map(select(.user.login != $skip))) as $kept | (($all | length) - ($kept | length)) as $dropped | if ($kept | length) == 0 then (if $dropped > 0 then "No prior review comments. (\($dropped) comment(s) from \($skip) are excluded from this block.)" else "No prior review comments." end) else ($kept | sort_by(.created_at) | .[] | "---", "Author: \(.user.login)", "File: \(.path)", (if .line then "Line: \(.line)" else empty end), (if .in_reply_to_id then "Reply to #\(.in_reply_to_id)" else "Thread #\(.id)" end), "", ((.body // "")[0:3000])) end'
+THREADS_JQ='(add // []) as $all | ($all | map(select(.user.login != $skip))) as $kept | ($kept | map(.id)) as $ids | (($all | length) - ($kept | length)) as $dropped | if ($kept | length) == 0 then (if $dropped > 0 then "No prior review comments. (\($dropped) comment(s) from \($skip) are excluded from this block.)" else "No prior review comments." end) else ($kept | sort_by(.created_at) | .[] | "---", "Author: \(.user.login)", "File: \(.path)", (if .line then "Line: \(.line)" else empty end), (if .in_reply_to_id then (if (.in_reply_to_id | IN($ids[])) then "Reply to #\(.in_reply_to_id)" else "Reply to a comment excluded from this block" end) else "Thread #\(.id)" end), "", ((.body // "")[0:3000])) end'
 if [ "$COMMENTS_OK" -eq 0 ]; then
   THREADS='Unavailable: the prior inline review comments could not be read. This block is empty because the fetch failed, not because there were none.'
 else
@@ -549,14 +549,33 @@ cap_file_escaped "$FILES_FILE" $((CTX_MAX_BYTES / 8)) \
 # The reviewer cannot run tests -- no dependencies are installed and the allowlist
 # would refuse anyway -- but CI already ran them. Whether they passed is the one
 # fact it was asserting without evidence.
-CHECKS_JQ='(.statusCheckRollup // []) | if length == 0 then "No checks reported." else map(if .__typename == "CheckRun" then "\(.conclusion // .status // "UNKNOWN") \(.workflowName // "") / \(.name // "(unnamed check)")" else "\(.state // "UNKNOWN") \(.context // "status")" end) | sort | join("\n") end'
+#
+# This block is the third channel $skip reaches, and the one where it does the most damage.
+# Pullfrog posts its verdict as a check -- `pullfrog-approval`, failing when it requested
+# changes -- and the prompt tells this reviewer that a failing check is a blocking issue to
+# name and cite. So an unfiltered rollup does not merely leak the other arm's conclusion; it
+# converts it into a request-changes this reviewer cannot substantiate from the diff.
+# `pullfrog` (the run-status check) rides along for the same reason, and its detailsUrl would
+# otherwise feed FAILING_JOBS_JQ below the *other reviewer's own job log* as a failing-job
+# excerpt, at up to an eighth of the context.
+#
+# Matched by name against the app slug rather than by a second constant: a GitHub App's bot
+# login is its slug plus "[bot]", and its checks are the slug and slug-prefixed names, so
+# $skip still carries the one value all five programs agree on. Both rollup shapes are
+# matched -- a CheckRun by .name, a StatusContext by .context -- because which of the two an
+# app posts is the app's choice, not ours.
+#
+# Silent while other checks remain, and stated when the exclusion empties the block: a list
+# claims nothing about being every check, but "No checks reported." on a PR that has some is
+# a false claim, and this is the block whose emptiness the README warns gets read as green.
+CHECKS_JQ='def slug: $skip | sub("\\[bot\\]$"; ""); def theirs: ((if .__typename == "CheckRun" then (.name // "") else (.context // "") end) | . == slug or startswith(slug + "-")); def render: if .__typename == "CheckRun" then "\(.conclusion // .status // "UNKNOWN") \(.workflowName // "") / \(.name // "(unnamed check)")" else "\(.state // "UNKNOWN") \(.context // "status")" end; (.statusCheckRollup // []) as $all | ($all | map(select(theirs | not))) as $kept | (($all | length) - ($kept | length)) as $dropped | if ($kept | length) == 0 then (if $dropped > 0 then "No checks reported. (\($dropped) check(s) from \(slug) are excluded from this block; they carry a verdict from another reviewer, not a CI result.)" else "No checks reported." end) else ($kept | map(render) | sort | join("\n")) end'
 # Actions check runs carry the job id in detailsUrl; scan rather than capture so a
 # non-Actions check with no job id drops out instead of erroring.
-FAILING_JOBS_JQ='[(.statusCheckRollup // [])[] | select(.__typename == "CheckRun") | select((.conclusion // "") | test("FAILURE|TIMED_OUT|ACTION_REQUIRED")) | (.detailsUrl // "") | [scan("/job/([0-9]+)")] | flatten | .[0] // empty] | unique | .[0:3] | join(" ")'
+FAILING_JOBS_JQ='def slug: $skip | sub("\\[bot\\]$"; ""); [(.statusCheckRollup // [])[] | select(.__typename == "CheckRun") | select(((.name // "") | . == slug or startswith(slug + "-")) | not) | select((.conclusion // "") | test("FAILURE|TIMED_OUT|ACTION_REQUIRED")) | (.detailsUrl // "") | [scan("/job/([0-9]+)")] | flatten | .[0] // empty] | unique | .[0:3] | join(" ")'
 if ROLLUP=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json statusCheckRollup); then
-  CHECKS=$(printf '%s' "$ROLLUP" | jq -r "$CHECKS_JQ" 2>/dev/null) \
+  CHECKS=$(printf '%s' "$ROLLUP" | jq --arg skip "$OTHER_REVIEW_BOT" -r "$CHECKS_JQ" 2>/dev/null) \
     || CHECKS="Could not parse checks."
-  JOB_IDS=$(printf '%s' "$ROLLUP" | jq -r "$FAILING_JOBS_JQ" 2>/dev/null) || JOB_IDS=''
+  JOB_IDS=$(printf '%s' "$ROLLUP" | jq --arg skip "$OTHER_REVIEW_BOT" -r "$FAILING_JOBS_JQ" 2>/dev/null) || JOB_IDS=''
 else
   echo "::warning::Could not read check status."
   CHECKS="Could not read check status."

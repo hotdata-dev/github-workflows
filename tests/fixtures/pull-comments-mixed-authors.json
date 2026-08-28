@@ -25,6 +25,15 @@
     "body": "## Summary\n\nThis PR reworks the context budget. One finding: the byte cap and the line cap disagree."
   },
   {
+    "id": 2105,
+    "user": { "login": "zfarrell" },
+    "path": "scripts/gather-review-context.sh",
+    "line": 88,
+    "in_reply_to_id": 2103,
+    "created_at": "2026-08-27T09:40:00Z",
+    "body": "Good catch -- fixed in the next push."
+  },
+  {
     "id": 2104,
     "user": { "login": "claude[bot]" },
     "path": "tests/lib.sh",

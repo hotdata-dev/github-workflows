@@ -1,0 +1,32 @@
+[
+  {
+    "id": 1,
+    "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "COMMENTED",
+    "submitted_at": "2026-08-28T00:00:00Z",
+    "user": {
+      "login": "pullfrog[bot]",
+      "type": "Bot"
+    }
+  },
+  {
+    "id": 2,
+    "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "state": "CHANGES_REQUESTED",
+    "submitted_at": "2026-08-28T00:01:00Z",
+    "user": {
+      "login": "claude-review[bot]",
+      "type": "Bot"
+    }
+  },
+  {
+    "id": 3,
+    "commit_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "state": "APPROVED",
+    "submitted_at": "2026-08-28T01:00:00Z",
+    "user": {
+      "login": "claude-review[bot]",
+      "type": "Bot"
+    }
+  }
+]
