@@ -1,0 +1,68 @@
+# PULLFROG ACTION — DO NOT EDIT EXCEPT WHERE INDICATED
+#
+# Dispatched by Pullfrog's control plane, never by a pull_request event, and always against
+# `main` -- so this file governs a trial run only once it is on the default branch, and a
+# pull request changing it is not reviewed by its own copy. The same trap
+# claude-pr-review.yml carries, for the same reason.
+#
+# Every deviation from the console-generated file is below, and each one is deliberate:
+#
+#   env: removed entirely     The generated file maps ten provider secrets, ANTHROPIC_API_KEY
+#                             among them, which would hand the org secret that gates the
+#                             production reviewer to a third-party agent and let auto-select
+#                             quietly run this trial on Claude. The rest name secrets that do
+#                             not exist, and a workflow env: value *wins* over a
+#                             Pullfrog-stored key -- so an empty mapping would override the
+#                             console's OPENAI_API_KEY and fail every run with "Missing API
+#                             key". The key lives in the Pullfrog console instead, which also
+#                             keeps rotation and model changes off this file.
+#   push: disabled            The trial reviews and does nothing else. Read-only at the
+#                             action, so it holds even if a console toggle flips.
+#   shell: restricted         Already the default for a public repo; stated so it survives
+#                             the repo going private.
+#   progress_comments:        The reviewer next door reads the PR conversation into its
+#     disabled                prompt, where a live task list is context it pays for.
+#   timeout: 20m              A review is not an hour of work; the reviewer beside it is
+#                             capped at 15 minutes.
+#   checkout pinned           This repository pins every action to an exact patch version.
+#                             pullfrog/pullfrog stays on @v0 on the vendor's own advice: the
+#                             action is a bootstrap that floats the agent from npm, so a SHA
+#                             pin freezes only the post-run cleanup step and goes stale into
+#                             runs that fail after the agent has finished its work.
+name: Pullfrog
+run-name: ${{ inputs.name || github.workflow }}
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        type: string
+        description: Agent prompt
+      name:
+        type: string
+        description: Run name
+
+permissions:
+  contents: read
+
+jobs:
+  pullfrog:
+    runs-on: ubuntu-latest
+    permissions:
+      # The only two the action needs: id-token to mint its own short-lived installation
+      # tokens over OIDC, contents to clone. It never uses this job's GITHUB_TOKEN, so
+      # nothing here grants it the ability to comment, review, or push.
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 1
+      - name: Run agent
+        uses: pullfrog/pullfrog@v0
+        with:
+          prompt: ${{ inputs.prompt }}
+          push: disabled
+          shell: restricted
+          progress_comments: disabled
+          timeout: 20m
