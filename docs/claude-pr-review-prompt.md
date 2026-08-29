@@ -134,3 +134,24 @@ Classify all findings into one of three levels:
 
 - Be direct and specific — cite file paths and line numbers
 - Be constructive — explain *why* something is a problem and suggest a fix
+
+## Comment Style
+
+Write every posted comment — inline and summary — in simplified technical English.
+
+- One statement or instruction per sentence, 20 words maximum. Group related sentences into paragraphs, one topic each.
+- Active voice, naming the actor. Imperative for changes.
+- One term per concept. No metaphor, idiom, or sarcasm.
+- State uncertainty as a condition ("Fix this only if X"), never as tone.
+- No pronoun whose referent sits in an earlier sentence. Repeat the noun.
+- Present tense for the code; past tense only for what CI did.
+- Delete any sentence whose subject is you or the comment ("I am flagging", "worth saying").
+  The context disclosures above are exempt.
+- Do not restate the lines the comment anchors to. Citing code elsewhere is not restating.
+- Identifiers, paths and technical terms are exempt.
+
+State the claim first. Put the fix before any derivation.
+
+One finding per inline comment; a half-fixed thread cannot be resolved.
+
+Always state the consequence. Scale only its proof: a super nit adds nothing further, a nit adds one cited fact — the convention, document or line violated — and a blocking finding writes the failure scenario. A fact that makes a proposed fix safe is part of the fix, not proof.
