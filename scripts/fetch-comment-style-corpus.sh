@@ -20,6 +20,16 @@ SOURCES=(
   "hotdata-dev/runtimedb:1236"
 )
 
+# The shape the recorded numbers were measured against. Baseline membership is derived
+# from whichever comments exist at fetch time, and #38 and #1242 contribute all of theirs,
+# so one comment added, deleted, or edited to lose its `nit:` prefix silently rewrites the
+# set that docs/comment-style-harness.md says its totals came from. The guard at the end
+# refuses to leave that unremarked; tests/comment-style-corpus-test.sh reads these two
+# constants rather than repeating them. Changing the corpus on purpose means changing them
+# in the same commit as the table.
+EXPECTED_COMMENTS=19
+EXPECTED_BASELINE=14
+
 # The 14 comments the baseline in docs/comment-style-harness.md was measured against.
 # Every comment on #38 and #1242 qualified; #1236 contributes four of its nine, picked
 # to add a blocking finding and a second domain. The rest of #1236 is corpus but not
@@ -31,7 +41,10 @@ BASELINE_IDS='[3884595787, 3884597515, 3884598006, 3885278816]'
 REVIEWER='claude[bot]'
 
 tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
+# All three, not just $tmp: .page and .merged are removed inline at the end of each
+# iteration, so an abort between them -- a gh 404 on a repo the token cannot see is the
+# likely one -- leaves them behind under set -e.
+trap 'rm -f "$tmp" "$tmp".page "$tmp".merged' EXIT
 echo '[]' > "$tmp"
 
 for source in "${SOURCES[@]}"; do
@@ -67,11 +80,19 @@ for source in "${SOURCES[@]}"; do
   rm -f "${tmp}.page"
 done
 
-jq '{
+jq --arg who "$REVIEWER" '{
   fetched_utc: (now | todate),
-  reviewer: "claude[bot]",
+  reviewer: $who,
   comments: .
 }' "$tmp" > "$OUT"
 
 count=$(jq '.comments | length' "$OUT")
-echo "wrote ${count} comments to ${OUT}" >&2
+baseline=$(jq '[.comments[] | select(.baseline)] | length' "$OUT")
+if [ "$count" != "$EXPECTED_COMMENTS" ] || [ "$baseline" != "$EXPECTED_BASELINE" ]; then
+  echo "corpus changed shape: ${count} comments / ${baseline} baseline" \
+       "(expected ${EXPECTED_COMMENTS}/${EXPECTED_BASELINE})." >&2
+  echo "The totals in docs/comment-style-harness.md were measured against the expected" \
+       "shape. Re-measure the baseline table, or restore the corpus." >&2
+  exit 1
+fi
+echo "wrote ${count} comments to ${OUT} (${baseline} baseline)" >&2
