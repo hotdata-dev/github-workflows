@@ -143,7 +143,13 @@ Measured over the 14 baseline comments, by the two agents that ran each ruleset.
 | As posted | 2,338 | — |
 | Sentence caps + `<details>` folds | 2,290 | −2% |
 | Proof-scaling, first draft | 938 | −60% |
-| Candidate (PR #39) | 1,256 | −46% |
+| Shipped (#39) | 1,256 | −46% |
+
+The shipped row measures the section as the gate run saw it. Two fixes landed on #39 after
+that run — `One finding per comment` scoped to inline comments, and the context disclosures
+exempted from the self-subject rule — so the merged text is a little longer than 1,256 words
+of output implies. Neither changes what the rules ask for on the corpus, which holds no
+summary comment and no disclosure.
 
 The first draft of proof-scaling scored best and was rejected: it bought the extra 14
 points by dropping consequences, which is the second defect listed above.
