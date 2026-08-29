@@ -13,6 +13,9 @@ Automated code review on every pull request using [claude-code-action](https://g
 - **No issues** — silent approve
 
 The review prompt lives in [`docs/claude-pr-review-prompt.md`](docs/claude-pr-review-prompt.md).
+Changes to its comment-style, severity or output rules go through
+[`docs/comment-style-harness.md`](docs/comment-style-harness.md) first — the prompt deploys
+org-wide from `main` with no staging, and that procedure is the staging.
 
 ### Frontloaded review context
 
