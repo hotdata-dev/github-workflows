@@ -1,0 +1,196 @@
+{
+  "fetched_utc": "2026-08-29T17:56:04Z",
+  "reviewer": "claude[bot]",
+  "comments": [
+    {
+      "repo": "hotdata-dev/github-workflows",
+      "pr": 38,
+      "id": 3882309208,
+      "path": "README.md",
+      "line": null,
+      "severity": "nit",
+      "baseline": true,
+      "body": "nit: (not blocking) The check is a third channel into this prompt, and it is the one left unexcluded.\n\n`CHECKS_JQ` (`scripts/gather-review-context.sh:552`) renders every rollup entry as `<conclusion> <workflowName> / <name>` with no filter on name or author, so once `pullfrog-approval` has settled before the context step runs — a re-review, or any run where Pullfrog is faster — `FAILURE / pullfrog-approval` lands in the `## CI checks` block. That is the other arm's verdict reaching this reviewer before it forms its own, which is the independence the two exclusions above exist to protect. It also has a behavioural edge the comment threads do not: the review prompt says a failing check is a blocking issue and to name it, so the likely output is a request-changes citing `pullfrog-approval` — a blocking finding this reviewer cannot substantiate from the diff.\n\nAnd if #37 runs Pullfrog as an Actions workflow, `FAILING_JOBS_JQ` (`:555`) scans `/job/([0-9]+)` out of `detailsUrl` and `fetch_raw`s that job's log into a `### Failing job` excerpt, i.e. Pullfrog's own output verbatim, at up to an eighth of the context — the byte argument in the paragraph above, applied to the block that argument does not cover.\n\nExcluding it needs no new constant: the check's `name`/`workflowName` is already in the rollup entry, so both programs can drop it the way the comment programs drop `$skip`. If the verdict is deliberately kept visible, the paragraph is the place to say why the CI block is an exception — as written it reads as \"the check is harmless because it does not gate merge\", which is true of merge and silent about the prompt."
+    },
+    {
+      "repo": "hotdata-dev/github-workflows",
+      "pr": 38,
+      "id": 3882310166,
+      "path": "tests/review-cycle-test.sh",
+      "line": 81,
+      "severity": "nit",
+      "baseline": true,
+      "body": "nit: (not blocking) The state this change makes ordinary is the one state left untested. After the exclusion, every PR in a trial repo carries a `pullfrog[bot]` review, so the drift warning's only remaining job is to fire when a *drifted* reviewer login sits beside the excluded one. The two assertions here cover pullfrog alone (silent) and `reviews-foreign-reviewer.json` covers a foreign bot alone (fires); nothing covers both in the same fixture.\n\nThat is exactly the gap a wrong-but-plausible predicate slips through — `all(.[][]; ...)`, or filtering `$skip` out of the array and then testing `.user.type` on what remains in a way that short-circuits — passes both existing cases and goes silent on the only case that matters in a trial repo. Adding a `pullfrog[bot]` entry to `reviews-foreign-reviewer.json` closes it without a new file (`LAST_REVIEW_JQ` in `pr-context-test.sh` still yields `\"\"` for that fixture, since it filters on `claude[bot]`), or a `reviews-drift-with-other-bot.json` keeps the two fixtures single-purpose."
+    },
+    {
+      "repo": "hotdata-dev/github-workflows",
+      "pr": 38,
+      "id": 3882311081,
+      "path": "scripts/gather-review-context.sh",
+      "line": null,
+      "severity": "super nit",
+      "baseline": true,
+      "body": "super nit: (not blocking) Dropping by author leaves replies to dropped comments dangling. A human answering one of `$skip`'s findings is kept, so the block can render `Reply to #2103` with no `Thread #2103` anywhere in it — and the reply's text (\"Fixed in the next push\") reads as a settled finding whose subject this reviewer never sees, which is the \"not to be re-raised\" reading the block is written to produce. Your own `pull-comments-mixed-authors.json` has the shape (2102 → 2101), just with the parent kept.\n\nNot fixable by filtering — the reply is real human feedback and dropping it hides more than it protects — so this is only worth doing if the trial shows humans replying to Pullfrog inline. If they do, relabelling an orphaned reply costs one membership test: `($kept | map(.id)) as $ids` and then `if .in_reply_to_id then (if (.in_reply_to_id | IN($ids[])) then \"Reply to #\\(.in_reply_to_id)\" else \"Reply to a comment excluded from this block\" end) else ...`."
+    },
+    {
+      "repo": "hotdata-dev/github-workflows",
+      "pr": 38,
+      "id": 3882389032,
+      "path": "scripts/gather-review-context.sh",
+      "line": null,
+      "severity": "nit",
+      "baseline": true,
+      "body": "nit: (not blocking) The exclusion holds only while #37 names its job `pullfrog`/`pullfrog-*`, lowercase.\n\n`theirs` tests the entry's own name — `.name` for a CheckRun — against `slug` and `slug + \"-\"`, case-sensitively, and never looks at `.workflowName`, which `render` prints as the *first* half of the line it emits. `rollup-with-review-bot.json`'s own `detailsUrl` says these are Actions check runs, and for those `.name` is the job name while `.workflowName` is the workflow's `name:`. So the ordinary shape in the other PR —\n\n```yaml\nname: Pullfrog\njobs:\n  review:\n```\n\n— lands in the rollup as `{name: \"review\", workflowName: \"Pullfrog\"}`, `theirs` is false in both programs, and both leaks come back whole: `FAILURE Pullfrog / review` in the list, and that job's log fetched into a `### Failing job` excerpt. The naming that closes the hole lives in #37 and nothing in this repo pins it; the fixture asserts a job that happens to be named `pullfrog`, which is the assumption rather than the guarantee. Same for case — a job named `Pullfrog` misses, since the slug is lowercase by construction and a job name is not.\n\nTwo clauses buy independence from the naming instead of depending on it: match `.workflowName` too (dropping a workflow named for the other reviewer is exactly the intent), and downcase before comparing.\n\n`def theirs: [(if .__typename == \"CheckRun\" then (.name // \"\") else (.context // \"\") end), (.workflowName // \"\")] | any(. != \"\" and (ascii_downcase | . == slug or startswith(slug + \"-\")));`\n\nwith the same predicate in `FAILING_JOBS_JQ` — where it is currently a second, narrower copy of the same rule, so the two can disagree about what \"theirs\" means. A fixture with `{\"name\": \"review\", \"workflowName\": \"Pullfrog\"}` pins it."
+    },
+    {
+      "repo": "hotdata-dev/github-workflows",
+      "pr": 38,
+      "id": 3882389427,
+      "path": "README.md",
+      "line": null,
+      "severity": "super nit",
+      "baseline": true,
+      "body": "super nit: (not blocking) \"the four exclusions\" leaves the fifth program off the removal list, and it is the one where an incomplete removal fails silently.\n\n`DRIFT_JQ` also carries `$skip`. Delete the constant without touching that program and the call at `scripts/gather-review-context.sh:351` — `jq --arg skip \"$OTHER_REVIEW_BOT\" -e -s \"$DRIFT_JQ\"` with `2>&1` discarded — exits non-zero on an undefined `$skip`, which the `elif` reads as \"no drift\". The backstop against a reviewer-login change is then gone with no warning in either direction, which is the failure this paragraph's own argument is about. Since this section is what the removal will be worked from, worth saying \"the constant, the four exclusions and the drift predicate\"."
+    },
+    {
+      "repo": "hotdata-dev/github-workflows",
+      "pr": 38,
+      "id": 3882438932,
+      "path": "scripts/gather-review-context.sh",
+      "line": 571,
+      "severity": "super nit",
+      "baseline": true,
+      "body": "super nit: (not blocking) This paragraph now describes the rule the next one replaces, and the two run together.\n\nLines 562-566 still say the match is \"by name … a CheckRun by `.name`, a StatusContext by `.context`\", which is exactly the name-only, case-sensitive rule cycle 2 established is not enough — a maintainer stopping here reads the current `theirs` as narrower than it is, and reads it as complete. Lines 577-585 say the true rule; the earlier paragraph is the superseded draft of it. Worth folding the two into one, or at least amending 565-566 to \"both names on the entry, downcased\".\n\nAlso missing the `#` separator between \"…gets read as green.\" (570) and \"One definition of…\" (571), so the silent/stated asymmetry and the shared-owner-test rationale render as one paragraph. Every other break in this block has one.\n\nSame class: the block says \"all five programs agree on\" `$skip` while `CHECKS_JQ` and `FAILING_JOBS_JQ` now reach it through `CHECK_OWNER_JQ`, and :302 still says \"three programs below\" (as does `extract_const`'s comment in `tests/lib.sh:45`). The README's removal list is the one that has to be right and it is; these are just counts that stopped counting."
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1242,
+      "id": 3886508630,
+      "path": "src/catalog/postgres_manager.rs",
+      "line": null,
+      "severity": "nit",
+      "baseline": true,
+      "body": "nit: this is the only query against `instances` that computes its cutoff from the pod clock (not blocking).\n\n`last_heartbeat` and `started_at` are both written with `NOW()` (`register_instance`, line 2193), and `migrations/postgres/v35.sql:10-11` states the reason: \"last_heartbeat / started_at are written with the DB clock so staleness comparisons never mix the pod clock with the DB clock.\" The two existing readers follow it — `sweep_orphaned_query_runs` uses `NOW() - (INTERVAL '1 second' * $1)` with a comment saying so, and `prune_dead_instances` does the same. This one binds `Utc::now() - staleness` instead.\n\nThe skew directions aren't symmetric, which matters given the PR's fail-open design:\n\n- pod clock **ahead** of the DB by > staleness → cutoff excludes everything → `None` → fail open. Harmless.\n- pod clock **behind** the DB by > staleness → the window widens to `staleness + skew`, so an instance that is already dead but not yet pruned (`instance_prune_after` ≫ staleness) can still satisfy the predicate and be returned as leader. Every live replica then compares against an owner id that no longer exists and skips its sweep, so maintenance stops fleet-wide until that row is pruned — fail *closed*, which is the one outcome `is_maintenance_leader` is written to avoid.\n\nWith the default 30s heartbeat this needs >120s of skew, so it's unlikely under NTP; I'm flagging it for the invariant rather than the probability. One-line fix, matching `prune_dead_instances`:\n\n```suggestion\n        let row: Option<(String,)> = sqlx::query_as(\n            \"SELECT owner_id FROM instances\n             WHERE last_heartbeat > NOW() - (INTERVAL '1 second' * $1)\n             ORDER BY started_at ASC, owner_id ASC\n             LIMIT 1\",\n        )\n        .bind(staleness.num_seconds() as f64)\n```\n\n(The SQLite side is fine as-is — app-clock RFC3339 on both write and read is the documented single-node convention there.)"
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1242,
+      "id": 3886508712,
+      "path": "src/engine/jobs/maintenance.rs",
+      "line": null,
+      "severity": "nit",
+      "baseline": true,
+      "body": "nit: the two doc blocks have merged (not blocking).\n\nThere's no separator between the end of `submit_maintenance_job`'s doc (lines 61-66, which used to sit directly above it) and the new one starting here, so rustdoc attaches the whole thing to `is_maintenance_leader`. Net effect: `is_maintenance_leader`'s docs open with \"Enqueue a periodic maintenance sweep, deduplicated cluster-wide. Returns the new job id when this call enqueued the sweep…\", which describes a different function, and the `pub` `submit_maintenance_job` at line 113 is left with no doc comment at all.\n\nMoving `is_maintenance_leader` below `submit_maintenance_job` (or above its doc block) fixes it."
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1242,
+      "id": 3886508995,
+      "path": "src/engine/jobs/maintenance.rs",
+      "line": 744,
+      "severity": "nit",
+      "baseline": true,
+      "body": "nit: this drops the first-tick catch-up on multi-replica deployments, and `start_ticker`'s doc above (lines 683-686) still claims it (not blocking).\n\nDuring a rolling deploy the *old* pod is both the oldest `started_at` and still heartbeating — `start_heartbeat_worker`'s handle is deliberately aborted last, after in-flight work drains (`instance_liveness.rs:18-21`). So while new pods boot, the leader is a pod whose own ticker has already broken out on the shutdown token. Every new replica's immediate first tick is skipped, and because the gate is only re-evaluated on the next tick, the next attempt is one full interval later — up to an hour for vacuum/compaction.\n\nBounded and not a stall (the last-run guard already spaces sweeps at 0.9× interval, so worst case is ~2 intervals between vacuums after a deploy), but the PR description's \"the immediate first tick stays as it is\" only holds for the single-replica case. Either re-check leadership on a short backoff when the first tick is skipped, or just amend the `start_ticker` doc comment so the catch-up claim isn't left stale."
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1242,
+      "id": 3886509142,
+      "path": "src/engine/jobs/maintenance.rs",
+      "line": null,
+      "severity": "nit",
+      "baseline": true,
+      "body": "nit: the fail-open branches aren't tested (not blocking).\n\n`oldest_live_instance_picks_the_longest_lived_replica` covers the SQL well on both backends, but nothing exercises `is_maintenance_leader` itself: the zero-interval early return, `Ok(None)` → `true`, `Err` → `true`, and `Ok(Some(other))` → `false`. Those four branches are the part where a mistake is silent — an inverted comparison or an accidental `false` on the error path stops maintenance fleet-wide with no failing job to alert on, which is strictly worse than the bug being fixed here.\n\n`FailingCatalog` in `tests/integration/result_persistence_tests.rs` already forwards `oldest_live_instance`, so a variant that returns `Err` (or a fixed owner id) would cover the table cheaply."
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1236,
+      "id": 3884595787,
+      "path": "config-compose.toml",
+      "line": null,
+      "severity": "nit",
+      "baseline": true,
+      "body": "nit: the stated reason for this block isn't accurate (not blocking).\n\nThe egress guard is only wired into the *guarded outbound HTTP client* — `crate::outbound_http::guarded_client`, constructed at `src/engine/builder.rs:1279` and `src/embedding/openai.rs:320`. Its module doc (`src/core/egress.rs:3`) scopes it to \"every outbound HTTP call made on a caller's behalf\". Object storage does not go through it: `src/storage/s3.rs` and `src/storage/multipart_presign.rs` contain no reference to `EgressPolicy`/`GuardedClient`, and neither do the Postgres catalog or Redis clients.\n\nSo \"without this, the server cannot resolve or reach `minio:9000`\" is not what happens — MinIO, Postgres and Redis are reachable with `[egress]` absent entirely. `scripts/run-local.sh:104-107` is the corroborating precedent: it allowlists only loopback, and its comment says explicitly that it's for a local *embeddings* endpoint.\n\nTwo consequences worth acting on:\n\n- The block as written opens all three RFC1918 ranges, which CLAUDE.md calls out specifically (\"a specific range, not all of RFC1918\").\n- A reader who trusts this comment will carry the same allowlist into a deployment to \"make storage work\", where it does open real reach.\n\nEither drop `[egress]` from this file (nothing in the stack needs it), or keep it with a comment saying what it actually enables — e.g. pointing an embedding provider at a container on this network."
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1236,
+      "id": 3884596296,
+      "path": "scripts/compose-smoke.sh",
+      "line": null,
+      "severity": "nit",
+      "baseline": false,
+      "body": "nit: this comment is stale as of this same commit (not blocking).\n\nThe diff fixes `src/datafusion/bm25_table_function.rs:46` to read `'catalog.schema.table'`, so line 46 no longer says what this paragraph says it says. A reader who follows the pointer finds the opposite of the claim and has to work out which one is current.\n\nThe useful half is the two-identifier distinction above it (lines 154-158), which stands on its own. Suggest dropping the \"Note the doc comment ... says\" paragraph, or rewording to the positive form: `bm25_search` takes the catalog name (`default_catalog`), while the index routes take the connection id."
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1236,
+      "id": 3884597044,
+      "path": "Dockerfile.compose",
+      "line": null,
+      "severity": "nit",
+      "baseline": false,
+      "body": "nit: `set -e` makes the failure-path cleanup unreachable (not blocking).\n\n`cargo build` on line 81 is a simple command in an `set -e` shell, so a non-zero exit aborts the `RUN` right there. `status=$?` never executes, and neither does the `git config --unset-all` / `rm -f /root/.gitconfig` pair the comment on lines 64-67 describes as \"belt and braces\". On the success path `$status` is always 0, so line 85's guard never does anything either.\n\nThe outcome is still correct — a failed build fails the stage and the layer is discarded, so the token never lands anywhere — but the code reads as if it handles the failure case and doesn't. Either drop the `status` dance and let `set -e` do the work:\n\n```\n    cargo build --release --bin server; \\\n    git config --global --unset-all url.\"https://x-access-token:$(cat /run/secrets/github_token 2>/dev/null)@github.com/\".insteadOf 2>/dev/null || true; \\\n    rm -f /root/.gitconfig; \\\n    cp target/release/server /build/server\n```\n\nor keep the cleanup on both paths by making the build's status observable, e.g. `if cargo build --release --bin server; then status=0; else status=$?; fi`."
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1236,
+      "id": 3884597515,
+      "path": "Dockerfile.compose",
+      "line": null,
+      "severity": "super nit",
+      "baseline": true,
+      "body": "super nit: lld is installed but never used (not blocking).\n\nCI reaches lld via `RUSTFLAGS: \"-C debuginfo=0 -C link-arg=-fuse-ld=lld\"` (`.github/workflows/ci.yml:63`, `:102`); this stage sets no `RUSTFLAGS`, so cargo links with the default `cc`/`ld`. \"lld matches CI's linker\" describes an intent the file doesn't carry out.\n\nSince a cold build here is the 30-60 min the header advertises, adding the flag is probably the version you want rather than dropping the package:\n\n```dockerfile\nENV RUSTFLAGS=\"-C debuginfo=0 -C link-arg=-fuse-ld=lld\"\n```"
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1236,
+      "id": 3884598006,
+      "path": "docker-compose.yml",
+      "line": null,
+      "severity": "nit",
+      "baseline": true,
+      "body": "nit: on the question you raised in the description — I'd take the narrow profile (not blocking).\n\nYour reasoning for a disposable local rig is sound and I'm not going to block on it. The argument for doing it anyway is that this is the one line most likely to get copied out of context: it's short, it's the fix for an opaque startup failure, and the surrounding \"NOT FOR SHARED USE\" caveat lives 100 lines up in the header rather than next to the knob. A three-syscall allowlist costs one JSON file and keeps the rest of the default profile.\n\n```yaml\n    security_opt:\n      - seccomp=./docker/seccomp-io-uring.json\n```\n\nwhere the file is Docker's default profile plus `io_uring_setup`, `io_uring_enter`, `io_uring_register` in the allowed names list. Your call — the diagnosis in the comment is the valuable part either way, and it's right."
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1236,
+      "id": 3885278816,
+      "path": "Dockerfile.compose",
+      "line": null,
+      "severity": "blocking",
+      "baseline": true,
+      "body": "The builder's distro is below the PROJ floor this crate documents.\n\n`Cargo.toml:58` states the constraint explicitly: *\"PROJ 9.4 == the proj-sys 0.25 floor — the crate pins proj 0.29 for exactly that\"*, and CI honours it by building on Ubuntu 24.04 (`.github/workflows/ci.yml:41,61,100,204` are all `ubuntu-2404`, with `libgeos-dev libproj-dev` installed at `:81,:125,:231` — PROJ 9.4 there).\n\nThis stage is `rust:1.94.0-bookworm`. Debian bookworm's `libproj-dev` is PROJ **9.1.1**, so `pkg-config --atleast-version=9.4.0 proj` fails and `proj-sys` has no system PROJ to bind against. `libgeos-dev` is fine (bookworm is 3.11.1, which clears the `geos-3_11` floor) — it's only PROJ that's short.\n\nI could not run the build to confirm the failure mode, and the description says a cold build completed, so one of these is true and it's worth pinning down in the comment either way:\n\n- it fails at `proj-sys`, and `docker compose build` — the headline feature — is broken for everyone; or\n- `proj-sys` falls back to building PROJ from source, which needs `cmake`, `libsqlite3-dev`, `libtiff-dev` and `libcurl4-openssl-dev` that this stage doesn't install, and would add materially to the 30-60 min the header advertises.\n\nThe cheap fix is a base whose PROJ clears the floor — Debian trixie ships 9.6:\n\n```suggestion\n# lld matches CI's linker; libgeos-dev/libproj-dev are the build-time halves of\n# the libgeos-c1t64/libproj25 runtime packages the server dynamically links.\n# The base must be trixie, not bookworm: proj-sys 0.25 needs PROJ >= 9.4 (see\n# Cargo.toml) and bookworm ships 9.1.1. CI builds on Ubuntu 24.04 for the same\n# reason.\nRUN export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y \\\n    lld \\\n    libgeos-dev \\\n    libproj-dev \\\n    && rm -rf /var/lib/apt/lists/*\n```\n\n(paired with a `-trixie` tag on the `FROM` above)."
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1236,
+      "id": 3885279197,
+      "path": "Dockerfile.compose",
+      "line": null,
+      "severity": "nit",
+      "baseline": false,
+      "body": "nit: the base tag and `rust-toolchain.toml` don't actually agree (not blocking).\n\n`rust-toolchain.toml:2` is `channel = \"1.95.0\"`; this is `rust:1.94.0-bookworm`. Because the file is copied in below, rustup honours it and silently downloads 1.95.0 on the first cargo invocation — so the build works, but the base pin buys nothing (a second toolchain is fetched every cold build) and the comment above describes a coupling the file doesn't have.\n\n```suggestion\n# Pinned to rust-toolchain.toml's channel. rust-toolchain.toml is copied first\n# so a channel bump invalidates from here rather than silently building on the\n# base image's default toolchain.\nFROM rust:1.95.0-bookworm AS builder\n```\n\nWorth keeping in step with `rust-toolchain.toml` when the channel moves, since nothing here fails loudly if it drifts."
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1236,
+      "id": 3886931333,
+      "path": "Dockerfile.compose",
+      "line": 119,
+      "severity": "nit",
+      "baseline": false,
+      "body": "nit: the git-dependency clones aren't cached, so every rebuild re-fetches them (not blocking).\n\n`CARGO_HOME=/usr/local/cargo`, and only `$CARGO_HOME/registry` has a cache mount. Cargo puts git dependencies in `$CARGO_HOME/git/db` and `$CARGO_HOME/git/checkouts`, which sit in this RUN's own layer — discarded and re-created whenever the layer re-executes. None of the parent layers (apt, rustup, the `COPY`s) contain that directory, so a rebuild after any `src/` edit re-clones the whole git set from scratch: `datafusion-functions-json`, `geodatafusion-hotspatial`, `datafusion-ducklake`, `datafusion-vector-search-ext`, `hotquery`, `liquid-cache`, plus the `geoarrow-rs` repo behind the three `[patch.crates-io]` entries. That works against the \"a rebuild after a source edit is a small fraction of that\" claim in the header, and it re-exercises the private-repo auth path every time.\n\nOne extra mount fixes it:\n\n```suggestion\n    --mount=type=cache,target=/usr/local/cargo/registry \\\n    --mount=type=cache,target=/usr/local/cargo/git \\\n```\n"
+    },
+    {
+      "repo": "hotdata-dev/runtimedb",
+      "pr": 1236,
+      "id": 3886931591,
+      "path": "docker-compose.yml",
+      "line": 256,
+      "severity": "super nit",
+      "baseline": false,
+      "body": "super nit: `>/dev/null 2>&1` makes an `apk` failure silent (not blocking).\n\nIf the package fetch fails — no outbound network, a mirror hiccup — the `&&` short-circuits, `bash /smoke.sh` never runs, and `docker compose --profile smoke run --rm smoke` exits non-zero having printed nothing at all. That is exactly the failure mode the script's own header argues against (\"a smoke test that only says 'failed' costs more time than it saves\"), and it reads as if the stack is broken rather than the setup step.\n\nDropping the redirect costs a few lines of apk progress output before step 1:\n\n```suggestion\n      - \"apk add --no-cache bash curl jq && bash /smoke.sh\"\n```\n"
+    }
+  ]
+}

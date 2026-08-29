@@ -55,6 +55,12 @@ jobs:
       - name: Context step end to end
         run: tests/context-step-test.sh
 
+      # Guards the comment style harness's corpus rather than the review workflow: the
+      # recorded totals in docs/comment-style-harness.md are only comparable while the
+      # committed corpus keeps the shape they were measured against.
+      - name: Comment style corpus
+        run: tests/comment-style-corpus-test.sh
+
   # Runs claude-pr-review.yml itself, from this commit, with the review step skipped. The checks
   # above all read the workflow as text; this one hands it to Actions and asks whether it starts.
   #
