@@ -39,7 +39,16 @@ concurrency:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
+    # Fork pull requests run without secrets, so the App token step would fail on an empty
+    # private key before any review. Skip them rather than fail every outside contribution.
+    # Compared by name, not head.repo.fork, which is also true for same-repo branches in a repo
+    # that is itself a fork. A non-pull_request event is the smoke run on push to main, which
+    # must still run; keyed on the event name because a fork's payload is documented as empty,
+    # so testing for an absent payload would let forks through.
+    if: >-
+      github.event.pull_request.draft == false &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
