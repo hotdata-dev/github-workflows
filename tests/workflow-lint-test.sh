@@ -216,6 +216,37 @@ else
   echo "ok   the review step runs only when the context step succeeded"
 fi
 
+# Actions withholds secrets from pull_request runs whose head is a fork, so the App token step
+# gets an empty private key and the job fails before any review happens -- a red check on every
+# outside contribution in every consumer repo, for a review that could never have run. The job
+# has to skip those instead. Two ways to get the guard wrong, both checked:
+#   - head.repo.fork is true for any head repo that is itself a fork, including a same-repo
+#     branch in a hotdata repo forked from upstream, so it would skip our own pull requests.
+#     Comparing the head repo's full name to this repo is the question actually being asked.
+#   - tests.yml runs this workflow on push to main, where there is no pull request and the head
+#     repo expands to null. A bare comparison is then false and the smoke job silently skips on
+#     main, so the guard must let a run without a pull request through.
+job_gate=$(awk '/^  review:$/ { found = 1; next }
+                found && /^    if:/ { print; in_if = 1; next }
+                in_if && /^      / { print; next }
+                in_if { exit }' "$WORKFLOW_FILE")
+if [ -z "$job_gate" ]; then
+  echo "FAIL could not find the review job's if: in $WORKFLOW_FILE; this check proves nothing"
+  failures=$((failures + 1))
+elif ! printf '%s\n' "$job_gate" | grep -qF 'github.event.pull_request.head.repo.full_name == github.repository'; then
+  echo "FAIL the review job does not skip pull requests from forks, which run without secrets"
+  echo "     and fail at the App token step:"
+  printf '%s\n' "$job_gate" | sed 's/^/       /'
+  failures=$((failures + 1))
+elif ! printf '%s\n' "$job_gate" | grep -qF '!github.event.pull_request ||'; then
+  echo "FAIL the review job's fork guard is not bypassed when there is no pull request, so the"
+  echo "     smoke run on push to main skips instead of proving the workflow starts:"
+  printf '%s\n' "$job_gate" | sed 's/^/       /'
+  failures=$((failures + 1))
+else
+  echo "ok   the review job skips fork pull requests and still runs without one"
+fi
+
 # The table above forces a new API call in the context step to declare its permission on the
 # review job. That does nothing for the smoke job in tests.yml, which calls the review workflow
 # and has to grant the same set by hand: a caller cannot give a reusable workflow more than it
