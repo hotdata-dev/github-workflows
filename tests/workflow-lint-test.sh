@@ -225,7 +225,9 @@ fi
 #     Comparing the head repo's full name to this repo is the question actually being asked.
 #   - tests.yml runs this workflow on push to main, where there is no pull request and the head
 #     repo expands to null. A bare comparison is then false and the smoke job silently skips on
-#     main, so the guard must let a run without a pull request through.
+#     main, so the guard must let a run without a pull request through -- keyed on the event
+#     name, not on the payload being absent, because GitHub documents the pull_request payload
+#     as empty for fork pull requests, and `!github.event.pull_request` would wave those in.
 job_gate=$(awk '/^  review:$/ { found = 1; next }
                 found && /^    if:/ { print; in_if = 1; next }
                 in_if && /^      / { print; next }
@@ -238,7 +240,12 @@ elif ! printf '%s\n' "$job_gate" | grep -qF 'github.event.pull_request.head.repo
   echo "     and fail at the App token step:"
   printf '%s\n' "$job_gate" | sed 's/^/       /'
   failures=$((failures + 1))
-elif ! printf '%s\n' "$job_gate" | grep -qF '!github.event.pull_request ||'; then
+elif printf '%s\n' "$job_gate" | grep -qF '!github.event.pull_request'; then
+  echo "FAIL the review job's no-PR bypass tests for an absent payload, which is also true of a"
+  echo "     fork pull request's documented empty payload, so forks reach the App token step:"
+  printf '%s\n' "$job_gate" | sed 's/^/       /'
+  failures=$((failures + 1))
+elif ! printf '%s\n' "$job_gate" | grep -qF "github.event_name != 'pull_request' ||"; then
   echo "FAIL the review job's fork guard is not bypassed when there is no pull request, so the"
   echo "     smoke run on push to main skips instead of proving the workflow starts:"
   printf '%s\n' "$job_gate" | sed 's/^/       /'
