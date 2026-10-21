@@ -254,6 +254,22 @@ else
   echo "ok   the review job skips fork pull requests and still runs without one"
 fi
 
+# Draft pull requests are reviewed like any other. A ruleset-injected workflow only fires on the
+# default activity types -- opened, synchronize, reopened -- and GitHub ignores the `types:` the
+# file declares, so ready_for_review never reaches it. Skipping drafts therefore meant a draft
+# marked ready with no later push merged unreviewed: 8 of 48 draft-to-ready PRs in the 90 days
+# to 2026-10-21. Reviewing drafts costs about 4.5% more runs, since drafts are 3% of PRs.
+if [ -z "$job_gate" ]; then
+  : # already reported above
+elif printf '%s\n' "$job_gate" | grep -qF 'draft'; then
+  echo "FAIL the review job skips drafts, and a ruleset workflow never sees ready_for_review,"
+  echo "     so a draft marked ready without another push merges unreviewed:"
+  printf '%s\n' "$job_gate" | sed 's/^/       /'
+  failures=$((failures + 1))
+else
+  echo "ok   the review job reviews draft pull requests"
+fi
+
 # The table above forces a new API call in the context step to declare its permission on the
 # review job. That does nothing for the smoke job in tests.yml, which calls the review workflow
 # and has to grant the same set by hand: a caller cannot give a reusable workflow more than it
