@@ -2,7 +2,9 @@ name: Claude PR Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    # The defaults, spelled out. An org ruleset ignores this list and fires on exactly these, so
+    # anything added here would only take effect in this repository.
+    types: [opened, synchronize, reopened]
   # Callable so this repository's own CI can run this file and prove it starts. That is not a
   # theoretical worry: an org ruleset injects this workflow into every repo resolved from
   # `main`, so a pull request here is reviewed by main's copy and never by the copy it is
@@ -45,10 +47,13 @@ jobs:
     # that is itself a fork. A non-pull_request event is the smoke run on push to main, which
     # must still run; keyed on the event name because a fork's payload is documented as empty,
     # so testing for an absent payload would let forks through.
+    #
+    # Drafts are reviewed too. The ruleset fires this only on opened, synchronize and reopened,
+    # ignoring `types:` above, so ready_for_review never arrives: skipping drafts let a draft
+    # marked ready with no later push merge unreviewed.
     if: >-
-      github.event.pull_request.draft == false &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
